@@ -13,7 +13,7 @@
 ## 一键部署
 
 ```bash
-git clone https://github.com/genz27/flow2api.git && cd flow2api/docker-vnc && docker compose up -d --build
+git clone https://github.com/genz27/flow2api_tupdater.git && cd flow2api_tupdater && docker compose up -d --build
 ```
 
 部署后访问: `http://你的IP:8080`
@@ -21,7 +21,7 @@ git clone https://github.com/genz27/flow2api.git && cd flow2api/docker-vnc && do
 ## 更新升级
 
 ```bash
-cd ~/token-updater/flow2api && git pull && cd docker-vnc && docker compose down && docker compose build --no-cache && docker compose up -d
+cd flow2api_tupdater && git pull && docker compose down && docker compose build --no-cache && docker compose up -d
 ```
 
 ## 密码配置
