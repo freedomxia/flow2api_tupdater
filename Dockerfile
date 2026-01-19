@@ -1,14 +1,25 @@
-﻿# Flow2API Token Updater v3.0 - 轻量版
-# 无 VNC，通过 Cookie 导入登录
+﻿# Flow2API Token Updater v3.1
+# 持久化浏览器上下文 + VNC 登录 + Headless 刷新
 
 FROM python:3.11-slim-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV DISPLAY=:99
+ENV VNC_PASSWORD=flow2api
+ENV NOVNC_PORT=6080
+ENV RESOLUTION=1024x768x16
 
 WORKDIR /app
 
-# 安装 Chromium 依赖 (精简版)
+# 安装系统依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    # VNC
+    x11vnc \
+    xvfb \
+    fluxbox \
+    novnc \
+    websockify \
+    # Chromium 依赖
     libnss3 \
     libnspr4 \
     libatk1.0-0 \
@@ -25,30 +36,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpango-1.0-0 \
     libcairo2 \
     libxshmfence1 \
+    # 字体
     fonts-liberation \
     fonts-noto-cjk \
+    # 工具
+    supervisor \
     curl \
+    procps \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-# 安装 Python 依赖
+# Python 依赖
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 安装 Playwright Chromium
+# Playwright Chromium
 RUN playwright install chromium
 
-# 复制应用代码
+# 应用代码
 COPY token_updater/ /app/token_updater/
+COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
-# 创建目录
+# 目录
 RUN mkdir -p /app/profiles /app/logs /app/data
 
-# 端口
-EXPOSE 8002
+EXPOSE 6080 8002
 
-# 持久化
 VOLUME ["/app/profiles", "/app/logs", "/app/data"]
 
-# 直接用 Python 启动，避免 shell 脚本行尾符问题
-CMD ["python", "-m", "token_updater.main"]
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

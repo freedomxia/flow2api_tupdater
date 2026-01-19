@@ -7,6 +7,7 @@ services:
     restart: unless-stopped
     ports:
       - "8002:8002"
+      - "6080:6080"
     volumes:
       - ./data:/app/data
       - ./profiles:/app/profiles
@@ -17,5 +18,12 @@ services:
       - FLOW2API_URL=${FLOW2API_URL:-http://host.docker.internal:8000}
       - CONNECTION_TOKEN=${CONNECTION_TOKEN:-}
       - REFRESH_INTERVAL=${REFRESH_INTERVAL:-60}
+      - VNC_PASSWORD=${VNC_PASSWORD:-flow2api}
+      - RESOLUTION=${RESOLUTION:-1024x768x16}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # 内存限制
+    deploy:
+      resources:
+        limits:
+          memory: 1G

@@ -3,35 +3,19 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Token Updater v3.0</title>
+    <title>Token Updater v3.1</title>
     <style>
-        :root {
-            --bg: #09090b;
-            --card: #18181b;
-            --border: #27272a;
-            --text: #fafafa;
-            --muted: #a1a1aa;
-            --primary: #2563eb;
-            --primary-hover: #1d4ed8;
-            --success: #22c55e;
-            --warning: #f59e0b;
-            --danger: #ef4444;
-            --radius: 8px;
-        }
+        :root { --bg: #09090b; --card: #18181b; --border: #27272a; --text: #fafafa; --muted: #a1a1aa; --primary: #2563eb; --primary-hover: #1d4ed8; --success: #22c55e; --warning: #f59e0b; --danger: #ef4444; --radius: 8px; }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
         .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
-
         .login-wrap { display: flex; justify-content: center; align-items: center; min-height: 100vh; }
         .login-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 32px; width: 100%; max-width: 380px; }
         .login-card h1 { font-size: 24px; font-weight: 600; margin-bottom: 24px; text-align: center; }
-
         .form-group { margin-bottom: 16px; }
         .form-group label { display: block; font-size: 14px; color: var(--muted); margin-bottom: 6px; }
-        .form-group input, .form-group select, .form-group textarea { width: 100%; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: 14px; }
-        .form-group input:focus, .form-group textarea:focus { outline: none; border-color: var(--primary); }
-        .form-group textarea { min-height: 120px; font-family: monospace; resize: vertical; }
-
+        .form-group input { width: 100%; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: 14px; }
+        .form-group input:focus { outline: none; border-color: var(--primary); }
         .btn { padding: 10px 16px; border: none; border-radius: var(--radius); cursor: pointer; font-size: 14px; font-weight: 500; transition: all 0.15s; }
         .btn-primary { background: var(--primary); color: white; }
         .btn-primary:hover { background: var(--primary-hover); }
@@ -42,11 +26,9 @@
         .btn-ghost:hover { background: var(--card); }
         .btn-sm { padding: 6px 12px; font-size: 13px; }
         .btn-block { width: 100%; }
-
-        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 32px; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 32px; flex-wrap: wrap; gap: 12px; }
         .header h1 { font-size: 24px; font-weight: 600; }
         .header-actions { display: flex; gap: 12px; }
-
         .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 32px; }
         @media (max-width: 768px) { .stats { grid-template-columns: repeat(2, 1fr); } }
         .stat-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
@@ -54,15 +36,14 @@
         .stat-card .value { font-size: 32px; font-weight: 600; }
         .stat-card .value.green { color: var(--success); }
         .stat-card .value.yellow { color: var(--warning); }
-
         .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 24px; }
-        .card-header { display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--border); }
+        .card-header { display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--border); flex-wrap: wrap; gap: 8px; }
         .card-header h2 { font-size: 16px; font-weight: 600; }
         .card-body { padding: 20px; }
-
         .profile-grid { display: grid; gap: 12px; }
-        .profile-item { display: flex; align-items: center; justify-content: space-between; padding: 16px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); }
-        .profile-info { flex: 1; }
+        .profile-item { display: flex; align-items: center; justify-content: space-between; padding: 16px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); flex-wrap: wrap; gap: 12px; }
+        .profile-item.active { border-color: var(--success); }
+        .profile-info { flex: 1; min-width: 200px; }
         .profile-name { font-weight: 600; font-size: 15px; }
         .profile-meta { font-size: 13px; color: var(--muted); margin-top: 4px; }
         .profile-badges { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
@@ -72,38 +53,29 @@
         .badge-blue { background: rgba(37,99,235,0.15); color: var(--primary); }
         .badge-red { background: rgba(239,68,68,0.15); color: var(--danger); }
         .profile-actions { display: flex; gap: 8px; flex-wrap: wrap; }
-
         .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.8); justify-content: center; align-items: center; z-index: 100; padding: 20px; }
         .modal.show { display: flex; }
-        .modal-content { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 24px; width: 100%; max-width: 520px; max-height: 90vh; overflow-y: auto; }
+        .modal-content { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 24px; width: 100%; max-width: 480px; }
         .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
         .modal-header h3 { font-size: 18px; font-weight: 600; }
         .modal-close { background: none; border: none; color: var(--muted); font-size: 24px; cursor: pointer; }
         .modal-footer { display: flex; gap: 12px; justify-content: flex-end; margin-top: 24px; }
-
         .toast { position: fixed; bottom: 24px; right: 24px; padding: 12px 20px; border-radius: var(--radius); color: white; font-size: 14px; z-index: 200; animation: slideIn 0.2s; }
         .toast.success { background: var(--success); }
         .toast.error { background: var(--danger); }
         @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
-
         .hidden { display: none !important; }
         .empty { text-align: center; padding: 48px; color: var(--muted); }
         .config-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
         @media (max-width: 768px) { .config-grid { grid-template-columns: 1fr; } }
-
-        .help-text { font-size: 12px; color: var(--muted); margin-top: 8px; line-height: 1.5; }
-        .help-text a { color: var(--primary); }
-        .file-input { display: none; }
-        .upload-area { border: 2px dashed var(--border); border-radius: var(--radius); padding: 24px; text-align: center; cursor: pointer; transition: all 0.2s; }
-        .upload-area:hover { border-color: var(--primary); background: rgba(37,99,235,0.05); }
-        .upload-area.dragover { border-color: var(--primary); background: rgba(37,99,235,0.1); }
+        .tip { background: rgba(37,99,235,0.1); border: 1px solid rgba(37,99,235,0.3); border-radius: var(--radius); padding: 12px 16px; margin-bottom: 20px; font-size: 13px; color: var(--muted); }
     </style>
 </head>
 <body>
 <div id="login-page" class="login-wrap">
     <div class="login-card">
-        <h1>🔐 Token Updater v3</h1>
-        <p style="text-align:center;color:var(--muted);margin-bottom:20px;font-size:13px">轻量版 · Cookie 导入模式</p>
+        <h1>🔐 Token Updater</h1>
+        <p style="text-align:center;color:var(--muted);margin-bottom:20px;font-size:13px">v3.1 持久化会话版</p>
         <div class="form-group">
             <label>密码</label>
             <input type="password" id="login-password" placeholder="管理员密码" onkeypress="if(event.key==='Enter')doLogin()">
@@ -112,12 +84,12 @@
     </div>
 </div>
 <div id="main-page" class="container hidden"></div>
-<div class="modal" id="profile-modal"><div class="modal-content"></div></div>
-<div class="modal" id="cookie-modal"><div class="modal-content"></div></div>
+<div class="modal" id="modal"><div class="modal-content"></div></div>
 
 <script>
 const API = '';
 let token = localStorage.getItem('t') || '';
+const vncUrl = () => `${location.protocol}//${location.hostname}:6080/vnc.html`;
 
 async function init() {
     const r = await fetch(`${API}/api/auth/check`).then(r => r.json());
@@ -147,51 +119,42 @@ async function doLogin() {
     if (!p) { toast('请输入密码', 'error'); return; }
     try {
         const r = await fetch(`${API}/api/login`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ password: p })
         }).then(r => r.json());
         if (r.success) {
             token = r.token;
             localStorage.setItem('t', token);
-            showMain();
-            load();
+            showMain(); load();
             toast('登录成功', 'success');
         } else {
             toast(r.detail || '密码错误', 'error');
         }
-    } catch (e) {
-        toast('登录失败', 'error');
-    }
+    } catch (e) { toast('登录失败', 'error'); }
 }
 
 async function doLogout() {
     try { await fetch(`${API}/api/logout`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } }); } catch (e) {}
-    token = '';
-    localStorage.removeItem('t');
-    showLogin();
+    token = ''; localStorage.removeItem('t'); showLogin();
 }
 
 async function api(url, opt = {}) {
     const h = { Authorization: `Bearer ${token}`, ...opt.headers };
     const r = await fetch(url, { ...opt, headers: h });
-    if (r.status === 401) {
-        token = '';
-        localStorage.removeItem('t');
-        showLogin();
-        throw new Error('expired');
-    }
+    if (r.status === 401) { token = ''; localStorage.removeItem('t'); showLogin(); throw new Error('expired'); }
     return r;
 }
 
 function renderMain() {
     document.getElementById('main-page').innerHTML = `
     <div class="header">
-        <h1>Token Updater v3.0</h1>
+        <h1>Token Updater v3.1</h1>
         <div class="header-actions">
+            <a href="${vncUrl()}" target="_blank" class="btn btn-ghost">🖥️ VNC</a>
             <button class="btn btn-ghost" onclick="doLogout()">退出</button>
         </div>
     </div>
+    <div class="tip">💡 首次使用：创建 Profile → 点击「登录」→ 在 VNC 中完成 Google 登录 → 关闭浏览器。之后系统会自动用 Headless 模式刷新 Token。</div>
     <div class="stats">
         <div class="stat-card"><div class="label">Profile</div><div class="value" id="s-total">0</div></div>
         <div class="stat-card"><div class="label">已登录</div><div class="value green" id="s-login">0</div></div>
@@ -201,10 +164,7 @@ function renderMain() {
     <div class="card">
         <div class="card-header">
             <h2>⚙️ 配置</h2>
-            <div style="display:flex;gap:8px">
-                <button class="btn btn-ghost btn-sm" onclick="clearConnectionToken()">清空 Token</button>
-                <button class="btn btn-primary btn-sm" onclick="saveConfig()">保存</button>
-            </div>
+            <button class="btn btn-primary btn-sm" onclick="saveConfig()">保存</button>
         </div>
         <div class="card-body">
             <div class="config-grid">
@@ -219,7 +179,7 @@ function renderMain() {
             <h2>👤 Profiles</h2>
             <div style="display:flex;gap:8px">
                 <button class="btn btn-success btn-sm" onclick="syncAll()">🔄 同步全部</button>
-                <button class="btn btn-primary btn-sm" onclick="showProfileModal()">+ 新建</button>
+                <button class="btn btn-primary btn-sm" onclick="showModal()">+ 新建</button>
             </div>
         </div>
         <div class="card-body"><div class="profile-grid" id="profiles"></div></div>
@@ -246,80 +206,71 @@ function renderProfiles(ps) {
     const el = document.getElementById('profiles');
     el.innerHTML = '';
     if (!ps.length) {
-        el.innerHTML = `<div class="empty">暂无 Profile<br><button class="btn btn-primary" style="margin-top:16px" onclick="showProfileModal()">创建</button></div>`;
+        el.innerHTML = `<div class="empty">暂无 Profile<br><button class="btn btn-primary" style="margin-top:16px" onclick="showModal()">创建</button></div>`;
         return;
     }
     ps.forEach(p => {
         const item = document.createElement('div');
-        item.className = 'profile-item';
-        const metaParts = [p.email || '未登录'];
-        if (p.proxy_url) metaParts.push(`🌐 代理`);
-        if (p.last_sync_time) metaParts.push(new Date(p.last_sync_time).toLocaleString());
+        item.className = `profile-item${p.is_browser_active ? ' active' : ''}`;
+        const meta = [p.email || '未登录'];
+        if (p.proxy_url) meta.push('🌐 代理');
+        if (p.last_sync_time) meta.push(new Date(p.last_sync_time).toLocaleString());
         item.innerHTML = `
             <div class="profile-info">
-                <div class="profile-name">${p.name || ''}</div>
-                <div class="profile-meta">${metaParts.join(' · ')}</div>
+                <div class="profile-name">${p.name}</div>
+                <div class="profile-meta">${meta.join(' · ')}</div>
                 <div class="profile-badges">
                     <span class="badge ${p.is_logged_in ? 'badge-green' : 'badge-yellow'}">${p.is_logged_in ? '已登录' : '未登录'}</span>
                     <span class="badge ${p.is_active ? 'badge-blue' : 'badge-red'}">${p.is_active ? '启用' : '禁用'}</span>
+                    ${p.is_browser_active ? '<span class="badge badge-green">浏览器运行中</span>' : ''}
                     ${p.sync_count ? `<span class="badge badge-blue">${p.sync_count}次</span>` : ''}
                 </div>
             </div>
             <div class="profile-actions">
-                <button class="btn btn-primary btn-sm" onclick="showCookieModal(${p.id})" title="导入 Cookie">🍪 Cookie</button>
-                <button class="btn btn-ghost btn-sm" onclick="verifyCookies(${p.id})" title="验证">✓</button>
-                <button class="btn btn-warning btn-sm" onclick="syncProfile(${p.id})" title="同步">🔄</button>
-                <button class="btn btn-ghost btn-sm" onclick="showProfileModal(${p.id})" title="编辑">✏️</button>
-                <button class="btn btn-danger btn-sm" onclick="delProfile(${p.id}, '${p.name}')" title="删除">🗑️</button>
+                ${p.is_browser_active 
+                    ? `<button class="btn btn-warning btn-sm" onclick="closeBrowser(${p.id})">关闭浏览器</button>`
+                    : `<button class="btn btn-primary btn-sm" onclick="launchBrowser(${p.id})">🖥️ 登录</button>`
+                }
+                <button class="btn btn-ghost btn-sm" onclick="checkLogin(${p.id})">检测</button>
+                <button class="btn btn-warning btn-sm" onclick="syncProfile(${p.id})">🔄</button>
+                <button class="btn btn-ghost btn-sm" onclick="showModal(${p.id})">✏️</button>
+                <button class="btn btn-danger btn-sm" onclick="delProfile(${p.id},'${p.name}')">🗑️</button>
             </div>`;
         el.appendChild(item);
     });
 }
 
-async function saveConfig(opts = {}) {
+async function saveConfig() {
     const body = {};
     const url = document.getElementById('c-url').value.trim();
-    const tokenInput = document.getElementById('c-token').value;
-    const intervalValue = document.getElementById('c-int').value;
+    const tk = document.getElementById('c-token').value;
+    const int = document.getElementById('c-int').value;
     if (!url) { toast('请输入 Flow2API 地址', 'error'); return; }
     body.flow2api_url = url;
-    if (opts.forceToken || tokenInput !== '') body.connection_token = tokenInput;
-    if (intervalValue) {
-        const interval = parseInt(intervalValue, 10);
-        if (!Number.isFinite(interval) || interval < 1 || interval > 1440) {
-            toast('刷新间隔需在 1-1440 分钟之间', 'error');
-            return;
-        }
-        body.refresh_interval = interval;
+    if (tk) body.connection_token = tk;
+    if (int) {
+        const v = parseInt(int, 10);
+        if (v < 1 || v > 1440) { toast('刷新间隔需在 1-1440 分钟之间', 'error'); return; }
+        body.refresh_interval = v;
     }
-    await api(`${API}/api/config`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-    });
+    await api(`${API}/api/config`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     toast('已保存', 'success');
 }
 
-function clearConnectionToken() {
-    if (!confirm('确认清空连接 Token？')) return;
-    document.getElementById('c-token').value = '';
-    saveConfig({ forceToken: true });
-}
-
 let editId = null;
-function showProfileModal(id = null) {
+function showModal(id = null) {
     editId = id;
-    document.getElementById('profile-modal').classList.add('show');
-    document.querySelector('#profile-modal .modal-content').innerHTML = `
+    document.getElementById('modal').classList.add('show');
+    document.querySelector('.modal-content').innerHTML = `
         <div class="modal-header">
             <h3>${id ? '编辑' : '新建'} Profile</h3>
-            <button class="modal-close" onclick="hideProfileModal()">×</button>
+            <button class="modal-close" onclick="hideModal()">×</button>
         </div>
         <div class="form-group"><label>名称</label><input id="m-name"></div>
         <div class="form-group"><label>备注</label><input id="m-remark"></div>
         <div class="form-group"><label>代理 (可选)</label><input id="m-proxy" placeholder="http://user:pass@host:port"></div>
         <div class="modal-footer">
-            <button class="btn btn-ghost" onclick="hideProfileModal()">取消</button>
+            <button class="btn btn-ghost" onclick="hideModal()">取消</button>
             <button class="btn btn-primary" onclick="saveProfile()">${id ? '保存' : '创建'}</button>
         </div>`;
     if (id) loadProfile(id);
@@ -332,10 +283,7 @@ async function loadProfile(id) {
     document.getElementById('m-proxy').value = p.proxy_url || '';
 }
 
-function hideProfileModal() {
-    document.getElementById('profile-modal').classList.remove('show');
-    editId = null;
-}
+function hideModal() { document.getElementById('modal').classList.remove('show'); editId = null; }
 
 async function saveProfile() {
     const n = document.getElementById('m-name').value.trim();
@@ -343,128 +291,33 @@ async function saveProfile() {
     const px = document.getElementById('m-proxy').value.trim();
     if (!n) { toast('请输入名称', 'error'); return; }
     if (editId) {
-        await api(`${API}/api/profiles/${editId}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: n, remark: r, proxy_url: px, proxy_enabled: px ? true : false })
-        });
+        await api(`${API}/api/profiles/${editId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: n, remark: r, proxy_url: px, proxy_enabled: !!px }) });
     } else {
-        await api(`${API}/api/profiles`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: n, remark: r, proxy_url: px })
-        });
+        await api(`${API}/api/profiles`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: n, remark: r, proxy_url: px }) });
     }
-    hideProfileModal();
-    load();
+    hideModal(); load();
     toast(editId ? '已保存' : '已创建', 'success');
 }
 
-// Cookie Modal
-let cookieProfileId = null;
-function showCookieModal(id) {
-    cookieProfileId = id;
-    document.getElementById('cookie-modal').classList.add('show');
-    document.querySelector('#cookie-modal .modal-content').innerHTML = `
-        <div class="modal-header">
-            <h3>🍪 导入 Cookie</h3>
-            <button class="modal-close" onclick="hideCookieModal()">×</button>
-        </div>
-        <div class="form-group">
-            <label>上传 Cookie 文件</label>
-            <div class="upload-area" id="upload-area" onclick="document.getElementById('cookie-file').click()">
-                <div>📁 点击选择文件或拖拽到此处</div>
-                <div style="font-size:12px;color:var(--muted);margin-top:8px">支持 JSON 格式</div>
-            </div>
-            <input type="file" id="cookie-file" class="file-input" accept=".json,.txt" onchange="handleFileSelect(event)">
-        </div>
-        <div class="form-group">
-            <label>或粘贴 Cookie JSON</label>
-            <textarea id="cookie-json" placeholder='[{"name": "__Secure-next-auth.session-token", "value": "...", "domain": ".labs.google", ...}]'></textarea>
-        </div>
-        <div class="help-text">
-            <strong>如何获取 Cookie：</strong><br>
-            1. 在浏览器中登录 <a href="https://labs.google" target="_blank">labs.google</a><br>
-            2. 安装 <a href="https://chrome.google.com/webstore/detail/editthiscookie/fngmhnnpilhplaeedifhccceomclgfbg" target="_blank">EditThisCookie</a> 或类似插件<br>
-            3. 导出 labs.google 的所有 Cookie 为 JSON<br>
-            4. 上传或粘贴到这里
-        </div>
-        <div class="modal-footer">
-            <button class="btn btn-ghost" onclick="hideCookieModal()">取消</button>
-            <button class="btn btn-primary" onclick="importCookies()">导入</button>
-        </div>`;
-    
-    // Setup drag and drop
-    const area = document.getElementById('upload-area');
-    area.addEventListener('dragover', (e) => { e.preventDefault(); area.classList.add('dragover'); });
-    area.addEventListener('dragleave', () => area.classList.remove('dragover'));
-    area.addEventListener('drop', (e) => {
-        e.preventDefault();
-        area.classList.remove('dragover');
-        if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
-    });
+async function launchBrowser(id) {
+    toast('启动中...', 'success');
+    await api(`${API}/api/profiles/${id}/launch`, { method: 'POST' });
+    load();
+    window.open(vncUrl(), '_blank');
 }
 
-function hideCookieModal() {
-    document.getElementById('cookie-modal').classList.remove('show');
-    cookieProfileId = null;
+async function closeBrowser(id) {
+    toast('关闭中...', 'success');
+    const r = await api(`${API}/api/profiles/${id}/close`, { method: 'POST' }).then(r => r.json());
+    toast(r.is_logged_in ? '已保存登录状态' : '浏览器已关闭', 'success');
+    load();
 }
 
-function handleFileSelect(e) {
-    if (e.target.files.length) handleFile(e.target.files[0]);
-}
-
-function handleFile(file) {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-        document.getElementById('cookie-json').value = e.target.result;
-        toast('文件已加载', 'success');
-    };
-    reader.readAsText(file);
-}
-
-async function importCookies() {
-    const jsonStr = document.getElementById('cookie-json').value.trim();
-    if (!jsonStr) { toast('请输入或上传 Cookie', 'error'); return; }
-    
-    let cookies;
-    try {
-        cookies = JSON.parse(jsonStr);
-        if (cookies.cookies) cookies = cookies.cookies; // Support wrapped format
-        if (!Array.isArray(cookies)) throw new Error('not array');
-    } catch (e) {
-        toast('JSON 格式错误', 'error');
-        return;
-    }
-    
-    try {
-        const r = await api(`${API}/api/profiles/${cookieProfileId}/cookies`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ cookies })
-        }).then(r => r.json());
-        
-        if (r.success) {
-            toast('Cookie 导入成功', 'success');
-            hideCookieModal();
-            load();
-        } else {
-            toast(r.detail || r.error || '导入失败', 'error');
-        }
-    } catch (e) {
-        toast('导入失败', 'error');
-    }
-}
-
-async function verifyCookies(id) {
-    toast('验证中...', 'success');
-    try {
-        const r = await api(`${API}/api/profiles/${id}/cookies/verify`, { method: 'POST' }).then(r => r.json());
-        toast(r.valid ? 'Cookie 有效 ✓' : 'Cookie 已失效，请重新导入', r.valid ? 'success' : 'error');
-        load();
-    } catch (e) {
-        toast('验证失败', 'error');
-    }
+async function checkLogin(id) {
+    toast('检测中...', 'success');
+    const r = await api(`${API}/api/profiles/${id}/check-login`, { method: 'POST' }).then(r => r.json());
+    toast(r.is_logged_in ? '已登录 ✓' : '未登录或已过期', r.is_logged_in ? 'success' : 'error');
+    load();
 }
 
 async function syncProfile(id) {
@@ -488,18 +341,16 @@ async function delProfile(id, name) {
     load();
 }
 
-function toast(message, type = 'success') {
+function toast(msg, type = 'success') {
     const e = document.createElement('div');
     e.className = `toast ${type}`;
-    e.textContent = message;
+    e.textContent = msg;
     document.body.appendChild(e);
     setTimeout(() => e.remove(), 3000);
 }
 
 init();
-setInterval(() => {
-    if (!document.getElementById('main-page').classList.contains('hidden')) load();
-}, 15000);
+setInterval(() => { if (!document.getElementById('main-page').classList.contains('hidden')) load(); }, 15000);
 </script>
 </body>
 </html>
