@@ -1,4 +1,4 @@
-# Token Updater v2.0 依赖
+# Token Updater v3.0 依赖
 playwright==1.40.0
 fastapi==0.104.1
 uvicorn==0.24.0
@@ -7,3 +7,4 @@ pydantic==2.5.2
 python-dotenv==1.0.0
 apscheduler==3.10.4
 aiosqlite==0.19.0
+python-multipart==0.0.6
