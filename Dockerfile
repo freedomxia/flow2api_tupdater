@@ -40,13 +40,9 @@ RUN playwright install chromium
 
 # 复制应用代码
 COPY token_updater/ /app/token_updater/
-COPY entrypoint.sh /app/
 
 # 创建目录
 RUN mkdir -p /app/profiles /app/logs /app/data
-
-# 修复行尾符并设置权限
-RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
 # 端口
 EXPOSE 8002
@@ -54,4 +50,5 @@ EXPOSE 8002
 # 持久化
 VOLUME ["/app/profiles", "/app/logs", "/app/data"]
 
-ENTRYPOINT ["/app/entrypoint.sh"]
+# 直接用 Python 启动，避免 shell 脚本行尾符问题
+CMD ["python", "-m", "token_updater.main"]
