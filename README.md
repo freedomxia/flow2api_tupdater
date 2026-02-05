@@ -1,15 +1,14 @@
 ﻿# Flow2API Token Updater v3.0
 
-轻量版 Token 自动更新工具，通过 Cookie 导入方式管理 Google Labs 登录状态。
+轻量版 Token 自动更新工具，通过 Playwright 持久化 Profile 管理 Google Labs 登录状态，并用 Headless 模式定时刷新 Token。
 
 ## 特性
 
-- 🪶 轻量化：默认关闭 VNC/Xvfb/noVNC，降低常驻内存占用
-- 🍪 Cookie 导入：在本地浏览器登录后导出 Cookie
-- 🔄 自动刷新：定时使用 Cookie 刷新 Token
-- 👥 多 Profile：支持管理多个账号
+- 🪶 轻量化：VNC/Xvfb/noVNC 按需启动（仅登录时运行），降低常驻内存占用
+- 🔄 自动刷新：定时刷新 Token 并推送到 Flow2API
+- 👥 多 Profile：支持管理多个账号（Profile 级隔离）
 - 🌐 代理支持：每个 Profile 可配置独立代理
-- 🖥️ 可选 VNC：需要可视化登录时可开启（`ENABLE_VNC=1`），仅在登录时启动，关闭浏览器后自动停止以省内存
+- 🖥️ 可视化登录：需要时开启 VNC 登录，关闭浏览器后自动停止以省内存
 
 ## 快速开始
 
@@ -22,8 +21,8 @@ cd flow2api_tupdater
 cp .env.example .env
 # 编辑 .env 设置 ADMIN_PASSWORD 等
 
-# 启动
-docker compose up -d
+# 启动（或更新后重建）
+docker compose up -d --build
 
 ```
 
@@ -32,11 +31,10 @@ docker compose up -d
 ## 使用流程
 
 1. 创建 Profile
-2. 在本地浏览器登录 https://labs.google
-3. 使用浏览器插件（如 EditThisCookie）导出 Cookie
-4. 在管理界面导入 Cookie
-5. 配置 Flow2API 连接信息
-6. 开始自动同步
+2. 点击「登录」→ 打开 VNC 完成 Google 登录
+3. 点击「关闭浏览器」保存状态（VNC 会自动停止以节省内存）
+4. 配置 Flow2API 连接信息（`FLOW2API_URL` / `CONNECTION_TOKEN`）
+5. 开始自动同步
 
 ## 环境变量
 
@@ -47,7 +45,7 @@ docker compose up -d
 | FLOW2API_URL | Flow2API 地址 | http://host.docker.internal:8000 |
 | CONNECTION_TOKEN | Flow2API 连接 Token | - |
 | REFRESH_INTERVAL | 刷新间隔(分钟) | 60 |
-| ENABLE_VNC | 是否启用 VNC 登录(1/0) | 0 |
+| ENABLE_VNC | 是否启用 VNC 登录入口(1/0) | 1 |
 | VNC_PASSWORD | VNC 密码（开启 VNC 时使用） | flow2api |
 
 ## API
@@ -60,12 +58,12 @@ docker compose up -d
 
 ## 从 v2.0 升级
 
-v3.0 主要推荐 Cookie 导入方式（同时保留可选 VNC 以兼容旧流程）：
+v3.1 使用持久化 Profile 登录（按需启停 VNC 以降低内存）：
 
 1. 备份 `data/` 目录
 2. 拉取新版本
 3. 重新构建镜像
-4. 为每个 Profile 重新导入 Cookie
+4. 如需重新授权：进入管理界面逐个 Profile 点击「登录」完成 Google 登录
 
 ## License
 
