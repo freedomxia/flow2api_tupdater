@@ -18,6 +18,8 @@ services:
       - FLOW2API_URL=${FLOW2API_URL:-http://host.docker.internal:8000}
       - CONNECTION_TOKEN=${CONNECTION_TOKEN:-}
       - REFRESH_INTERVAL=${REFRESH_INTERVAL:-60}
+      # 默认关闭 VNC/Xvfb/noVNC（省内存）。需要可视化登录时设置 ENABLE_VNC=1
+      - ENABLE_VNC=${ENABLE_VNC:-0}
       - VNC_PASSWORD=${VNC_PASSWORD:-flow2api}
       - RESOLUTION=${RESOLUTION:-1024x768x16}
     extra_hosts:

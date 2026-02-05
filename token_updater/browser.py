@@ -1,9 +1,11 @@
 ﻿"""浏览器管理 v3.1 - 持久化上下文 + VNC登录 + Headless刷新"""
 import asyncio
+import json
 import os
 import shutil
+import subprocess
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from playwright.async_api import async_playwright, BrowserContext, Playwright
 from .config import config
 from .database import profile_db
@@ -26,10 +28,15 @@ BROWSER_ARGS = [
     "--no-first-run",
     "--no-default-browser-check",
     "--single-process",  # 单进程模式，省内存
-    "--memory-pressure-off",
     "--max_old_space_size=128",  # 限制 V8 内存
     "--js-flags=--max-old-space-size=128",
 ]
+
+BLOCKED_RESOURCE_TYPES = {"image", "media", "font", "stylesheet"}
+
+SUPERVISOR_CONF = "/etc/supervisor/conf.d/supervisord.conf"
+VNC_START_ORDER = ("xvfb", "fluxbox", "x11vnc", "novnc")
+VNC_STOP_ORDER = ("novnc", "x11vnc", "fluxbox", "xvfb")
 
 
 class BrowserManager:
@@ -53,9 +60,62 @@ class BrowserManager:
     async def stop(self):
         """停止"""
         await self._close_active()
+        await self._stop_vnc_stack()
         if self._playwright:
             await self._playwright.stop()
             self._playwright = None
+
+    def _supervisorctl(self, *args: str, timeout: float = 15.0) -> subprocess.CompletedProcess[str]:
+        exe = shutil.which("supervisorctl")
+        if not exe:
+            raise RuntimeError("supervisorctl not found")
+        cmd = [exe, "-c", SUPERVISOR_CONF, *args]
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+
+    def _get_supervisor_status(self) -> Dict[str, str]:
+        try:
+            cp = self._supervisorctl("status", timeout=8.0)
+        except Exception:
+            return {}
+
+        status: Dict[str, str] = {}
+        for line in (cp.stdout or "").splitlines():
+            parts = line.split()
+            if len(parts) >= 2:
+                status[parts[0]] = parts[1]
+        return status
+
+    async def _ensure_vnc_stack(self) -> bool:
+        if not config.enable_vnc:
+            return False
+
+        status = self._get_supervisor_status()
+        for prog in VNC_START_ORDER:
+            if status.get(prog) == "RUNNING":
+                continue
+            try:
+                cp = self._supervisorctl("start", prog, timeout=20.0)
+                if cp.returncode != 0:
+                    logger.warning(f"启动 {prog} 失败: {(cp.stdout or '').strip()} {(cp.stderr or '').strip()}")
+                    return False
+            except Exception as e:
+                logger.warning(f"启动 {prog} 异常: {e}")
+                return False
+
+            if prog == "xvfb":
+                await asyncio.sleep(0.4)
+
+        return True
+
+    async def _stop_vnc_stack(self) -> None:
+        if not config.enable_vnc:
+            return
+
+        for prog in VNC_STOP_ORDER:
+            try:
+                self._supervisorctl("stop", prog, timeout=10.0)
+            except Exception:
+                pass
 
     async def _close_active(self):
         """关闭当前浏览器"""
@@ -99,8 +159,158 @@ class BrowserManager:
                 return proxy
         return None
 
+    def _parse_cookies_payload(self, cookies_json: str) -> List[Dict[str, Any]]:
+        data = json.loads(cookies_json)
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            cookies = data.get("cookies")
+            if isinstance(cookies, list):
+                return cookies
+        return []
+
+    def _to_playwright_cookies(self, cookies: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for c in cookies:
+            if not isinstance(c, dict):
+                continue
+
+            name = c.get("name")
+            value = c.get("value")
+            if not name or value is None:
+                continue
+
+            domain = c.get("domain") or c.get("host")
+            url = c.get("url")
+            path = c.get("path") or "/"
+
+            if isinstance(domain, str) and "://" in domain:
+                domain = None
+
+            cookie: Dict[str, Any] = {"name": str(name), "value": str(value)}
+
+            if c.get("httpOnly") is not None:
+                cookie["httpOnly"] = bool(c.get("httpOnly"))
+            if c.get("secure") is not None:
+                cookie["secure"] = bool(c.get("secure"))
+
+            expires = c.get("expires")
+            if expires is None:
+                expires = c.get("expirationDate") or c.get("expiry")
+            if expires is not None:
+                try:
+                    cookie["expires"] = float(expires)
+                except (TypeError, ValueError):
+                    pass
+
+            same_site = c.get("sameSite")
+            if isinstance(same_site, str):
+                m = same_site.strip().lower()
+                if m in {"lax"}:
+                    cookie["sameSite"] = "Lax"
+                elif m in {"strict"}:
+                    cookie["sameSite"] = "Strict"
+                elif m in {"none", "no_restriction"}:
+                    cookie["sameSite"] = "None"
+
+            if isinstance(url, str) and url.startswith("http"):
+                cookie["url"] = url
+            elif isinstance(domain, str) and domain:
+                cookie["domain"] = domain
+                cookie["path"] = str(path)
+            else:
+                continue
+
+            out.append(cookie)
+        return out
+
+    async def _get_session_cookie(self, context: BrowserContext) -> Optional[str]:
+        try:
+            cookies = await context.cookies("https://labs.google")
+        except Exception:
+            cookies = await context.cookies()
+
+        for cookie in cookies:
+            if cookie.get("name") == config.session_cookie_name:
+                return cookie.get("value")
+        return None
+
+    async def import_cookies(self, profile_id: int, cookies_json: str) -> Dict[str, Any]:
+        """导入 Cookie（JSON），写入到持久化 profile 中"""
+        if len(cookies_json) > 300_000:
+            return {"success": False, "error": "Cookie 内容过大（建议只导出 labs.google 域名的 Cookie）"}
+
+        async with self._lock:
+            profile = await profile_db.get_profile(profile_id)
+            if not profile:
+                return {"success": False, "error": "Profile 不存在"}
+
+            try:
+                raw = self._parse_cookies_payload(cookies_json)
+            except Exception as e:
+                return {"success": False, "error": f"Cookie JSON 解析失败: {e}"}
+
+            if not raw:
+                return {"success": False, "error": "未识别到 Cookie 列表（请粘贴 JSON 数组或包含 cookies 字段的对象）"}
+
+            cookies = self._to_playwright_cookies(raw)
+            if not cookies:
+                return {"success": False, "error": "Cookie 列表为空或格式不支持（至少需要 name/value/domain+path 或 url）"}
+
+            context = None
+            try:
+                if not self._playwright:
+                    await self.start()
+
+                profile_dir = self._get_profile_dir(profile_id)
+                os.makedirs(profile_dir, exist_ok=True)
+                self._clean_locks(profile_dir)
+                proxy = await self._get_proxy(profile)
+
+                context = await self._playwright.chromium.launch_persistent_context(
+                    user_data_dir=profile_dir,
+                    headless=True,
+                    viewport={"width": 1024, "height": 768},
+                    locale="en-US",
+                    timezone_id="America/New_York",
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    proxy=proxy,
+                    args=BROWSER_ARGS,
+                    ignore_default_args=["--enable-automation"],
+                )
+
+                await context.add_cookies(cookies)
+                token = await self._get_session_cookie(context)
+
+                await profile_db.update_profile(
+                    profile_id,
+                    is_logged_in=1 if token else 0,
+                    last_token=self._mask_token(token) if token else None,
+                    last_token_time=datetime.now().isoformat() if token else None,
+                )
+
+                return {
+                    "success": True,
+                    "imported": len(cookies),
+                    "raw_count": len(raw),
+                    "has_token": bool(token),
+                }
+
+            except Exception as e:
+                logger.error(f"[{profile['name']}] Cookie 导入失败: {e}")
+                return {"success": False, "error": str(e)}
+            finally:
+                if context:
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass
+
     async def launch_for_login(self, profile_id: int) -> bool:
         """启动浏览器用于 VNC 登录（非 headless）"""
+        if not config.enable_vnc:
+            logger.warning("已禁用 VNC 登录（设置 ENABLE_VNC=1 可启用）")
+            return False
         async with self._lock:
             await self._close_active()
 
@@ -112,6 +322,11 @@ class BrowserManager:
             try:
                 if not self._playwright:
                     await self.start()
+
+                ok = await self._ensure_vnc_stack()
+                if not ok:
+                    logger.error(f"[{profile['name']}] VNC 服务启动失败")
+                    return False
 
                 profile_dir = self._get_profile_dir(profile_id)
                 os.makedirs(profile_dir, exist_ok=True)
@@ -159,6 +374,7 @@ class BrowserManager:
 
                 await profile_db.update_profile(profile_id, is_logged_in=int(is_logged_in))
                 await self._close_active()
+                await self._stop_vnc_stack()
 
                 status = "已登录" if is_logged_in else "未登录"
                 logger.info(f"Profile {profile_id} 浏览器已关闭，状态: {status}")
@@ -225,36 +441,53 @@ class BrowserManager:
 
     async def _extract_from_context(self, profile: Dict[str, Any], context: BrowserContext) -> Optional[str]:
         """从上下文提取 Token"""
+        page = None
         try:
-            page = context.pages[0] if context.pages else await context.new_page()
+            page = await context.new_page()
 
-            # 访问页面触发 session 刷新
-            logger.info(f"[{profile['name']}] 访问 {config.labs_url} 刷新 session...")
-            await page.goto(config.labs_url, wait_until="networkidle", timeout=60000)
-            
-            # 等待页面完全加载，确保 cookie 已更新
-            await asyncio.sleep(3)
-            
-            # 再次等待网络空闲，确保所有认证请求完成
+            async def _route(route, request):
+                try:
+                    if request.resource_type in BLOCKED_RESOURCE_TYPES:
+                        await route.abort()
+                    else:
+                        await route.continue_()
+                except Exception:
+                    try:
+                        await route.continue_()
+                    except Exception:
+                        pass
+
             try:
-                await page.wait_for_load_state("networkidle", timeout=10000)
+                await page.route("**/*", _route)
             except Exception:
                 pass
 
-            # 提取 cookie
-            cookies = await context.cookies("https://labs.google")
+            # 访问页面触发 session 刷新（尽量避免 networkidle 触发大量静态资源下载）
+            logger.info(f"[{profile['name']}] 访问 {config.labs_url} 刷新 session...")
+            await page.goto(config.labs_url, wait_until="domcontentloaded", timeout=60000)
+
+            # 等待 cookie 更新：优先轮询 session cookie，减少资源占用
             token = None
-            for cookie in cookies:
-                if cookie["name"] == config.session_cookie_name:
-                    token = cookie["value"]
+            deadline = asyncio.get_running_loop().time() + 12.0
+            while asyncio.get_running_loop().time() < deadline:
+                token = await self._get_session_cookie(context)
+                if token:
                     break
+                await asyncio.sleep(0.5)
+
+            if not token:
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=8000)
+                except Exception:
+                    pass
+                token = await self._get_session_cookie(context)
 
             if token:
                 await profile_db.update_profile(
                     profile["id"],
                     is_logged_in=1,
                     last_token=self._mask_token(token),
-                    last_token_time=datetime.now().isoformat()
+                    last_token_time=datetime.now().isoformat(),
                 )
                 logger.info(f"[{profile['name']}] Token 提取成功")
             else:
@@ -266,6 +499,12 @@ class BrowserManager:
         except Exception as e:
             logger.error(f"[{profile['name']}] 提取异常: {e}")
             return None
+        finally:
+            if page:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
 
     async def check_login_status(self, profile_id: int) -> Dict[str, Any]:
         """检查登录状态"""
@@ -273,12 +512,55 @@ class BrowserManager:
         if not profile:
             return {"success": False, "error": "Profile 不存在"}
 
-        token = await self.extract_token(profile_id)
+        token = await self.peek_token(profile_id)
+        await profile_db.update_profile(profile_id, is_logged_in=1 if token else 0)
         return {
             "success": True,
             "is_logged_in": token is not None,
             "profile_name": profile["name"]
         }
+
+    async def peek_token(self, profile_id: int) -> Optional[str]:
+        """轻量获取 token（不访问页面，仅读取 cookie）"""
+        async with self._lock:
+            profile = await profile_db.get_profile(profile_id)
+            if not profile:
+                return None
+
+            profile_dir = self._get_profile_dir(profile_id)
+            if not os.path.exists(profile_dir):
+                return None
+
+            if self._active_profile_id == profile_id and self._active_context:
+                return await self._get_session_cookie(self._active_context)
+
+            context = None
+            try:
+                if not self._playwright:
+                    await self.start()
+
+                self._clean_locks(profile_dir)
+                proxy = await self._get_proxy(profile)
+                context = await self._playwright.chromium.launch_persistent_context(
+                    user_data_dir=profile_dir,
+                    headless=True,
+                    viewport={"width": 1024, "height": 768},
+                    locale="en-US",
+                    timezone_id="America/New_York",
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    proxy=proxy,
+                    args=BROWSER_ARGS,
+                    ignore_default_args=["--enable-automation"],
+                )
+                return await self._get_session_cookie(context)
+            except Exception:
+                return None
+            finally:
+                if context:
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass
 
     async def delete_profile_data(self, profile_id: int):
         """删除 profile 数据"""
@@ -291,11 +573,15 @@ class BrowserManager:
         return self._active_profile_id
 
     def get_status(self) -> Dict[str, Any]:
+        status = self._get_supervisor_status()
+        vnc_stack_running = all(status.get(p) == "RUNNING" for p in ("xvfb", "x11vnc", "novnc")) if status else False
         return {
             "is_running": self._playwright is not None,
             "active_profile_id": self._active_profile_id,
             "has_active_browser": self._active_context is not None,
-            "profiles_dir": config.profiles_dir
+            "profiles_dir": config.profiles_dir,
+            "enable_vnc": bool(config.enable_vnc),
+            "vnc_stack_running": bool(vnc_stack_running),
         }
 
 

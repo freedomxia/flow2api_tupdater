@@ -4,11 +4,12 @@
 
 ## 特性
 
-- 🪶 轻量化：去除 VNC，镜像体积大幅减小
+- 🪶 轻量化：默认关闭 VNC/Xvfb/noVNC，降低常驻内存占用
 - 🍪 Cookie 导入：在本地浏览器登录后导出 Cookie
 - 🔄 自动刷新：定时使用 Cookie 刷新 Token
 - 👥 多 Profile：支持管理多个账号
 - 🌐 代理支持：每个 Profile 可配置独立代理
+- 🖥️ 可选 VNC：需要可视化登录时可开启（`ENABLE_VNC=1`），仅在登录时启动，关闭浏览器后自动停止以省内存
 
 ## 快速开始
 
@@ -46,6 +47,8 @@ docker compose up -d
 | FLOW2API_URL | Flow2API 地址 | http://host.docker.internal:8000 |
 | CONNECTION_TOKEN | Flow2API 连接 Token | - |
 | REFRESH_INTERVAL | 刷新间隔(分钟) | 60 |
+| ENABLE_VNC | 是否启用 VNC 登录(1/0) | 0 |
+| VNC_PASSWORD | VNC 密码（开启 VNC 时使用） | flow2api |
 
 ## API
 
@@ -57,7 +60,7 @@ docker compose up -d
 
 ## 从 v2.0 升级
 
-v3.0 移除了 VNC 功能，改用 Cookie 导入方式：
+v3.0 主要推荐 Cookie 导入方式（同时保留可选 VNC 以兼容旧流程）：
 
 1. 备份 `data/` 目录
 2. 拉取新版本

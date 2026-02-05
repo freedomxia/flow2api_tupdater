@@ -90,6 +90,9 @@
 const API = '';
 let token = localStorage.getItem('t') || '';
 const vncUrl = () => `${location.protocol}//${location.hostname}:6080/vnc.html`;
+let vncEnabled = true;
+let vncRunning = false;
+let cookieId = null;
 
 async function init() {
     const r = await fetch(`${API}/api/auth/check`).then(r => r.json());
@@ -150,11 +153,11 @@ function renderMain() {
     <div class="header">
         <h1>Token Updater v3.1</h1>
         <div class="header-actions">
-            <a href="${vncUrl()}" target="_blank" class="btn btn-ghost">🖥️ VNC</a>
+            <a id="vnc-btn" href="${vncUrl()}" target="_blank" class="btn btn-ghost">🖥️ VNC</a>
             <button class="btn btn-ghost" onclick="doLogout()">退出</button>
         </div>
     </div>
-    <div class="tip">💡 首次使用：创建 Profile → 点击「登录」→ 在 VNC 中完成 Google 登录 → 关闭浏览器。之后系统会自动用 Headless 模式刷新 Token。</div>
+    <div class="tip" id="tip">💡 首次使用：创建 Profile → 点击「登录」→ 在 VNC 中完成 Google 登录 → 关闭浏览器。之后系统会自动用 Headless 模式刷新 Token。</div>
     <div class="stats">
         <div class="stat-card"><div class="label">Profile</div><div class="value" id="s-total">0</div></div>
         <div class="stat-card"><div class="label">已登录</div><div class="value green" id="s-login">0</div></div>
@@ -189,6 +192,16 @@ function renderMain() {
 async function load() {
     try {
         const st = await api(`${API}/api/status`).then(r => r.json());
+        vncEnabled = !!(st && st.config && st.config.enable_vnc);
+        vncRunning = !!(st && st.browser && st.browser.vnc_stack_running);
+        const vbtn = document.getElementById('vnc-btn');
+        if (vbtn) vbtn.classList.toggle('hidden', !vncRunning);
+        const tipEl = document.getElementById('tip');
+        if (tipEl) {
+            tipEl.innerHTML = vncEnabled
+                ? '💡 登录方式：创建 Profile → 点击「登录」→ 在 VNC 中完成 Google 登录 → 关闭浏览器保存状态。提示：VNC 只在登录时启动，关闭浏览器后会自动停止以节省内存。'
+                : '💡 当前已禁用 VNC（更省内存）。需要重新登录时请设置 <code>ENABLE_VNC=1</code> 并重启容器，然后按「登录 → VNC → 关闭浏览器」流程完成。';
+        }
         document.getElementById('s-total').textContent = st.profiles.total;
         document.getElementById('s-login').textContent = st.profiles.logged_in;
         document.getElementById('s-sync').textContent = st.syncer.total_sync_count;
@@ -227,10 +240,11 @@ function renderProfiles(ps) {
                 </div>
             </div>
             <div class="profile-actions">
-                ${p.is_browser_active 
+                ${vncEnabled ? (p.is_browser_active 
                     ? `<button class="btn btn-warning btn-sm" onclick="closeBrowser(${p.id})">关闭浏览器</button>`
-                    : `<button class="btn btn-primary btn-sm" onclick="launchBrowser(${p.id})">🖥️ 登录</button>`
+                    : `<button class="btn btn-primary btn-sm" onclick="launchBrowser(${p.id})">🖥️ 登录</button>`) : ''
                 }
+                <button class="btn btn-ghost btn-sm" onclick="showCookieModal(${p.id})">🍪 Cookie</button>
                 <button class="btn btn-ghost btn-sm" onclick="checkLogin(${p.id})">检测</button>
                 <button class="btn btn-warning btn-sm" onclick="syncProfile(${p.id})">🔄</button>
                 <button class="btn btn-ghost btn-sm" onclick="showModal(${p.id})">✏️</button>
@@ -283,7 +297,7 @@ async function loadProfile(id) {
     document.getElementById('m-proxy').value = p.proxy_url || '';
 }
 
-function hideModal() { document.getElementById('modal').classList.remove('show'); editId = null; }
+function hideModal() { document.getElementById('modal').classList.remove('show'); editId = null; cookieId = null; }
 
 async function saveProfile() {
     const n = document.getElementById('m-name').value.trim();
@@ -299,9 +313,63 @@ async function saveProfile() {
     toast(editId ? '已保存' : '已创建', 'success');
 }
 
+function showCookieModal(id) {
+    cookieId = id;
+    document.getElementById('modal').classList.add('show');
+    document.querySelector('.modal-content').innerHTML = `
+        <div class="modal-header">
+            <h3>导入 Cookie</h3>
+            <button class="modal-close" onclick="hideModal()">×</button>
+        </div>
+        <div class="form-group">
+            <label>Cookie JSON（建议只导出 <code>labs.google</code> 域名）</label>
+            <textarea id="m-cookies" style="width:100%;min-height:180px;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:13px;line-height:1.4" placeholder='[{"name":"...","value":"...","domain":".labs.google","path":"/","secure":true,"httpOnly":true}]'></textarea>
+        </div>
+        <div class="tip" style="margin-top:12px">导入后会写入该 Profile 的浏览器持久化数据中。后续同步时系统会用 Headless 模式刷新 Token。</div>
+        <div class="modal-footer">
+            <button class="btn btn-ghost" onclick="hideModal()">取消</button>
+            <button class="btn btn-primary" onclick="doImportCookies()">导入</button>
+        </div>`;
+}
+
+async function doImportCookies() {
+    const text = (document.getElementById('m-cookies').value || '').trim();
+    if (!cookieId) { toast('未选择 Profile', 'error'); return; }
+    if (!text) { toast('请输入 Cookie JSON', 'error'); return; }
+    toast('导入中...', 'success');
+    try {
+        const resp = await api(`${API}/api/profiles/${cookieId}/import-cookies`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cookies_json: text })
+        });
+        const data = await resp.json();
+        if (!resp.ok) { toast(data.detail || '导入失败', 'error'); return; }
+        toast(data.has_token ? '导入成功 ✓' : '已导入，但未检测到 Token', data.has_token ? 'success' : 'error');
+        hideModal();
+        load();
+    } catch (e) {
+        toast('导入失败', 'error');
+    }
+}
+
+async function waitVncReady(timeoutMs = 10000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+        try {
+            const st = await api(`${API}/api/status`).then(r => r.json());
+            if (st && st.browser && st.browser.vnc_stack_running) return true;
+        } catch (e) {}
+        await new Promise(r => setTimeout(r, 500));
+    }
+    return false;
+}
+
 async function launchBrowser(id) {
     toast('启动中...', 'success');
-    await api(`${API}/api/profiles/${id}/launch`, { method: 'POST' });
+    const r = await api(`${API}/api/profiles/${id}/launch`, { method: 'POST' }).then(r => r.json());
+    if (!r.success) { toast(r.detail || r.error || '启动失败', 'error'); return; }
+    await waitVncReady();
     load();
     window.open(vncUrl(), '_blank');
 }

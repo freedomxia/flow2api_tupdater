@@ -41,12 +41,12 @@ async def startup():
     await profile_db.init()
     logger.info("数据库初始化完成")
 
-    await browser_manager.start()
-
     scheduler.add_job(
         scheduled_sync,
         trigger=IntervalTrigger(minutes=config.refresh_interval),
         id=SYNC_JOB_ID,
+        max_instances=1,
+        coalesce=True,
         replace_existing=True
     )
     scheduler.start()

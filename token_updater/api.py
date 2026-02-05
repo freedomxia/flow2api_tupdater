@@ -92,6 +92,9 @@ class UpdateConfigRequest(BaseModel):
     connection_token: Optional[str] = None
     refresh_interval: Optional[int] = None
 
+class ImportCookiesRequest(BaseModel):
+    cookies_json: str
+
 
 # Auth
 async def verify_session(authorization: str = Header(None)):
@@ -160,7 +163,8 @@ async def get_status(token: str = Depends(verify_session)):
             "flow2api_url": config.flow2api_url,
             "refresh_interval": config.refresh_interval,
             "has_connection_token": bool(config.connection_token),
-            "has_api_key": bool(config.api_key)
+            "has_api_key": bool(config.api_key),
+            "enable_vnc": bool(config.enable_vnc),
         },
         "version": "3.1.0"
     }
@@ -239,6 +243,8 @@ async def delete_profile(profile_id: int, token: str = Depends(verify_session)):
 # Browser
 @app.post("/api/profiles/{profile_id}/launch")
 async def launch_browser(profile_id: int, token: str = Depends(verify_session)):
+    if not config.enable_vnc:
+        raise HTTPException(400, "已禁用 VNC 登录（设置 ENABLE_VNC=1 可启用）")
     success = await browser_manager.launch_for_login(profile_id)
     if not success:
         raise HTTPException(500, "启动失败")
@@ -255,6 +261,16 @@ async def close_browser(profile_id: int, token: str = Depends(verify_session)):
 async def check_login(profile_id: int, token: str = Depends(verify_session)):
     return await browser_manager.check_login_status(profile_id)
 
+
+@app.post("/api/profiles/{profile_id}/import-cookies")
+async def import_cookies(profile_id: int, request: ImportCookiesRequest, token: str = Depends(verify_session)):
+    cookies_json = (request.cookies_json or "").strip()
+    if not cookies_json:
+        raise HTTPException(400, "Cookie 内容不能为空")
+    result = await browser_manager.import_cookies(profile_id, cookies_json)
+    if not result.get("success"):
+        raise HTTPException(400, result.get("error") or "导入失败")
+    return result
 
 # Token & Sync
 @app.post("/api/profiles/{profile_id}/extract")
@@ -284,6 +300,7 @@ async def get_config(token: str = Depends(verify_session)):
         "has_connection_token": bool(config.connection_token),
         "connection_token_preview": f"{config.connection_token[:10]}..." if config.connection_token else "",
         "has_api_key": bool(config.api_key),
+        "enable_vnc": bool(config.enable_vnc),
     }
 
 
