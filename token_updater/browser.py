@@ -440,7 +440,7 @@ class BrowserManager:
                     logger.info(f"[{profile['name']}] Headless 浏览器已关闭")
 
     async def _extract_from_context(self, profile: Dict[str, Any], context: BrowserContext) -> Optional[str]:
-        """从上下文提取 Token"""
+        """从上下文提取 Token（通过 signin 页面刷新 session）"""
         page = None
         try:
             page = await context.new_page()
@@ -462,9 +462,25 @@ class BrowserManager:
             except Exception:
                 pass
 
-            # 访问页面触发 session 刷新（尽量避免 networkidle 触发大量静态资源下载）
-            logger.info(f"[{profile['name']}] 访问 {config.labs_url} 刷新 session...")
-            await page.goto(config.labs_url, wait_until="domcontentloaded", timeout=60000)
+            # 访问 signin 页面并点击 Sign in with Google 按钮刷新 session
+            logger.info(f"[{profile['name']}] 访问 {config.login_url} 刷新 session...")
+            await page.goto(config.login_url, wait_until="domcontentloaded", timeout=60000)
+
+            # 点击 Sign in with Google 按钮（提交 POST 表单）
+            try:
+                submit_btn = page.locator("button[type='submit']")
+                await submit_btn.wait_for(state="visible", timeout=10000)
+                await submit_btn.click()
+                logger.info(f"[{profile['name']}] 已点击 Sign in with Google，等待跳转...")
+            except Exception as e:
+                logger.warning(f"[{profile['name']}] 点击登录按钮失败: {e}，尝试直接检查 cookie")
+
+            # 等待跳转到 https://labs.google/ 并提取 cookie
+            try:
+                await page.wait_for_url("https://labs.google/**", timeout=30000)
+                logger.info(f"[{profile['name']}] 已成功跳转到 labs.google")
+            except Exception as e:
+                logger.warning(f"[{profile['name']}] 等待跳转超时: {e}")
 
             # 等待 cookie 更新：优先轮询 session cookie，减少资源占用
             token = None
