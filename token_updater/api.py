@@ -91,6 +91,8 @@ class UpdateConfigRequest(BaseModel):
     flow2api_url: Optional[str] = None
     connection_token: Optional[str] = None
     refresh_interval: Optional[int] = None
+    gemini_api_url: Optional[str] = None
+    gemini_connection_token: Optional[str] = None
 
 class ImportCookiesRequest(BaseModel):
     cookies_json: str
@@ -165,6 +167,8 @@ async def get_status(token: str = Depends(verify_session)):
             "has_connection_token": bool(config.connection_token),
             "has_api_key": bool(config.api_key),
             "enable_vnc": bool(config.enable_vnc),
+            "gemini_api_url": config.gemini_api_url,
+            "has_gemini_connection_token": bool(config.gemini_connection_token),
         },
         "version": "3.1.0"
     }
@@ -276,8 +280,14 @@ async def import_cookies(profile_id: int, request: ImportCookiesRequest, token: 
 @app.post("/api/profiles/{profile_id}/extract")
 async def extract_token(profile_id: int, token: str = Depends(verify_session)):
     extracted = await browser_manager.extract_token(profile_id)
-    if extracted:
-        return {"success": True, "token_length": len(extracted)}
+    flow2api_token = extracted.get("flow2api_token")
+    gemini_cookies = extracted.get("gemini_cookies", {})
+    if flow2api_token or gemini_cookies.get("psid"):
+        return {
+            "success": True,
+            "has_flow2api_token": bool(flow2api_token),
+            "has_gemini_cookie": bool(gemini_cookies.get("psid")),
+        }
     return {"success": False, "message": "未找到 Token，请先登录"}
 
 
@@ -301,6 +311,9 @@ async def get_config(token: str = Depends(verify_session)):
         "connection_token_preview": f"{config.connection_token[:10]}..." if config.connection_token else "",
         "has_api_key": bool(config.api_key),
         "enable_vnc": bool(config.enable_vnc),
+        "gemini_api_url": config.gemini_api_url,
+        "has_gemini_connection_token": bool(config.gemini_connection_token),
+        "gemini_connection_token_preview": f"{config.gemini_connection_token[:10]}..." if config.gemini_connection_token else "",
     }
 
 
@@ -318,6 +331,10 @@ async def update_config(request: UpdateConfigRequest, api_request: Request, toke
         if request.refresh_interval < 1 or request.refresh_interval > 1440:
             raise HTTPException(400, "刷新间隔需在 1-1440 分钟之间")
         config.refresh_interval = request.refresh_interval
+    if request.gemini_api_url is not None:
+        config.gemini_api_url = request.gemini_api_url.strip()
+    if request.gemini_connection_token is not None:
+        config.gemini_connection_token = request.gemini_connection_token.strip()
     config.save()
 
     if request.refresh_interval and config.refresh_interval != old_interval:
@@ -345,10 +362,19 @@ async def ext_get_token(profile_id: int, api_key: str = Depends(verify_api_key))
         raise HTTPException(404, "Profile not found")
     if not profile.get("is_active"):
         raise HTTPException(400, "Profile is disabled")
-    token_value = await browser_manager.extract_token(profile_id)
-    if not token_value:
+    extracted = await browser_manager.extract_token(profile_id)
+    token_value = extracted.get("flow2api_token")
+    gemini_cookies = extracted.get("gemini_cookies", {})
+    if not token_value and not gemini_cookies.get("psid"):
         raise HTTPException(400, "Failed to extract token")
-    return {"success": True, "profile_id": profile_id, "profile_name": profile["name"], "email": profile.get("email"), "session_token": token_value}
+    return {
+        "success": True,
+        "profile_id": profile_id,
+        "profile_name": profile["name"],
+        "email": profile.get("email"),
+        "session_token": token_value,
+        "has_gemini_cookie": bool(gemini_cookies.get("psid")),
+    }
 
 
 @app.post("/v1/profiles/{profile_id}/sync")

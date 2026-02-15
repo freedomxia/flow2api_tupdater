@@ -1,10 +1,11 @@
 ﻿"""Token Updater 配置 v3.1"""
+from __future__ import annotations
 import json
 import os
 from pydantic import BaseModel
 
 
-PERSIST_KEYS = ("flow2api_url", "connection_token", "refresh_interval")
+PERSIST_KEYS = ("flow2api_url", "connection_token", "refresh_interval", "gemini_api_url", "gemini_connection_token")
 
 
 def _get_env(name: str) -> str | None:
@@ -57,6 +58,9 @@ class Config(BaseModel):
     labs_url: str = "https://labs.google/fx/tools/flow"
     login_url: str = "https://labs.google/fx/api/auth/signin/google"
     session_cookie_name: str = "__Secure-next-auth.session-token"
+    gemini_api_url: str = ""
+    gemini_connection_token: str = ""
+    gemini_login_url: str = "https://gemini.google.com"
     api_port: int
     db_path: str = "/app/data/profiles.db"
     session_ttl_minutes: int
@@ -75,6 +79,8 @@ def _build_config() -> Config:
     connection_token = _get_env("CONNECTION_TOKEN") or persisted.get("connection_token", "")
     refresh_interval = _parse_int(_get_env("REFRESH_INTERVAL") or str(persisted.get("refresh_interval", 60)), 60)
     enable_vnc = _parse_bool(_get_env("ENABLE_VNC"), default=True)
+    gemini_api_url = _get_env("GEMINI_API_URL") or persisted.get("gemini_api_url", "")
+    gemini_connection_token = _get_env("GEMINI_CONNECTION_TOKEN") or persisted.get("gemini_connection_token", "")
 
     return Config(
         admin_password=_get_env("ADMIN_PASSWORD") or "",
@@ -83,6 +89,8 @@ def _build_config() -> Config:
         connection_token=connection_token,
         refresh_interval=refresh_interval,
         enable_vnc=enable_vnc,
+        gemini_api_url=gemini_api_url,
+        gemini_connection_token=gemini_connection_token,
         api_port=_parse_int(_get_env("API_PORT"), 8002),
         session_ttl_minutes=_parse_int(_get_env("SESSION_TTL_MINUTES"), 1440),
         config_file=config_file,

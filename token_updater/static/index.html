@@ -29,7 +29,7 @@
         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 32px; flex-wrap: wrap; gap: 12px; }
         .header h1 { font-size: 24px; font-weight: 600; }
         .header-actions { display: flex; gap: 12px; }
-        .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 32px; }
+        .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 32px; }
         @media (max-width: 768px) { .stats { grid-template-columns: repeat(2, 1fr); } }
         .stat-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
         .stat-card .label { font-size: 13px; color: var(--muted); margin-bottom: 4px; }
@@ -161,8 +161,10 @@ function renderMain() {
     <div class="stats">
         <div class="stat-card"><div class="label">Profile</div><div class="value" id="s-total">0</div></div>
         <div class="stat-card"><div class="label">已登录</div><div class="value green" id="s-login">0</div></div>
-        <div class="stat-card"><div class="label">同步成功</div><div class="value green" id="s-sync">0</div></div>
-        <div class="stat-card"><div class="label">失败</div><div class="value yellow" id="s-err">0</div></div>
+        <div class="stat-card"><div class="label">Flow2API 成功</div><div class="value green" id="s-flow-sync">0</div></div>
+        <div class="stat-card"><div class="label">Flow2API 失败</div><div class="value yellow" id="s-flow-err">0</div></div>
+        <div class="stat-card"><div class="label">Gemini 成功</div><div class="value green" id="s-gem-sync">0</div></div>
+        <div class="stat-card"><div class="label">Gemini 失败</div><div class="value yellow" id="s-gem-err">0</div></div>
     </div>
     <div class="card">
         <div class="card-header">
@@ -174,6 +176,13 @@ function renderMain() {
                 <div class="form-group"><label>Flow2API 地址</label><input id="c-url"></div>
                 <div class="form-group"><label>连接 Token</label><input type="password" id="c-token"></div>
                 <div class="form-group"><label>刷新间隔(分钟)</label><input type="number" id="c-int" min="1" max="1440"></div>
+            </div>
+            <div style="border-top:1px solid var(--border);margin:16px 0;padding-top:16px">
+                <div style="font-size:13px;color:var(--muted);margin-bottom:12px">🤖 Gemini API（可选）</div>
+                <div class="config-grid">
+                    <div class="form-group"><label>Gemini API 地址</label><input id="c-gemini-url" placeholder="http://host:port"></div>
+                    <div class="form-group"><label>Gemini 连接 Token</label><input type="password" id="c-gemini-token"></div>
+                </div>
             </div>
         </div>
     </div>
@@ -204,12 +213,16 @@ async function load() {
         }
         document.getElementById('s-total').textContent = st.profiles.total;
         document.getElementById('s-login').textContent = st.profiles.logged_in;
-        document.getElementById('s-sync').textContent = st.syncer.total_sync_count;
-        document.getElementById('s-err').textContent = st.syncer.total_error_count;
+        document.getElementById('s-flow-sync').textContent = st.syncer.flow2api_sync_count || 0;
+        document.getElementById('s-flow-err').textContent = st.syncer.flow2api_error_count || 0;
+        document.getElementById('s-gem-sync').textContent = st.syncer.gemini_sync_count || 0;
+        document.getElementById('s-gem-err').textContent = st.syncer.gemini_error_count || 0;
         const cfg = await api(`${API}/api/config`).then(r => r.json());
         document.getElementById('c-url').value = cfg.flow2api_url || '';
         document.getElementById('c-int').value = cfg.refresh_interval || 60;
         if (cfg.connection_token_preview) document.getElementById('c-token').placeholder = cfg.connection_token_preview;
+        document.getElementById('c-gemini-url').value = cfg.gemini_api_url || '';
+        if (cfg.gemini_connection_token_preview) document.getElementById('c-gemini-token').placeholder = cfg.gemini_connection_token_preview;
         const ps = await api(`${API}/api/profiles`).then(r => r.json());
         renderProfiles(ps);
     } catch (e) { if (e.message !== 'expired') console.error(e); }
@@ -259,6 +272,8 @@ async function saveConfig() {
     const url = document.getElementById('c-url').value.trim();
     const tk = document.getElementById('c-token').value;
     const int = document.getElementById('c-int').value;
+    const geminiUrl = document.getElementById('c-gemini-url').value.trim();
+    const geminiTk = document.getElementById('c-gemini-token').value;
     if (!url) { toast('请输入 Flow2API 地址', 'error'); return; }
     body.flow2api_url = url;
     if (tk) body.connection_token = tk;
@@ -267,6 +282,8 @@ async function saveConfig() {
         if (v < 1 || v > 1440) { toast('刷新间隔需在 1-1440 分钟之间', 'error'); return; }
         body.refresh_interval = v;
     }
+    body.gemini_api_url = geminiUrl;
+    if (geminiTk) body.gemini_connection_token = geminiTk;
     await api(`${API}/api/config`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     toast('已保存', 'success');
 }

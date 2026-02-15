@@ -13,10 +13,9 @@ from .proxy_utils import parse_proxy, format_proxy_for_playwright
 from .logger import logger
 
 
-# 内存优化参数
+# 内存优化参数（移除不安全标志以通过 Google 安全检测）
 BROWSER_ARGS = [
     "--no-sandbox",
-    "--disable-setuid-sandbox",
     "--disable-dev-shm-usage",
     "--disable-gpu",
     "--disable-software-rasterizer",
@@ -235,6 +234,25 @@ class BrowserManager:
                 return cookie.get("value")
         return None
 
+    async def _get_gemini_cookies(self, context: BrowserContext) -> Dict[str, str]:
+        """从浏览器上下文提取 Gemini cookie（__Secure-1PSID / __Secure-1PSIDTS）"""
+        result = {}
+        try:
+            cookies = await context.cookies("https://gemini.google.com")
+        except Exception:
+            try:
+                cookies = await context.cookies()
+            except Exception:
+                return result
+
+        for cookie in cookies:
+            name = cookie.get("name", "")
+            if name == "__Secure-1PSID":
+                result["psid"] = cookie.get("value", "")
+            elif name == "__Secure-1PSIDTS":
+                result["psidts"] = cookie.get("value", "")
+        return result
+
     async def import_cookies(self, profile_id: int, cookies_json: str) -> Dict[str, Any]:
         """导入 Cookie（JSON），写入到持久化 profile 中"""
         if len(cookies_json) > 300_000:
@@ -333,7 +351,7 @@ class BrowserManager:
                 self._clean_locks(profile_dir)  # 清理锁文件
                 proxy = await self._get_proxy(profile)
 
-                # 非 headless，用于 VNC 登录
+                # 非 headless，用于 VNC 登录（移除可能触发 Google 检测的参数）
                 self._active_context = await self._playwright.chromium.launch_persistent_context(
                     user_data_dir=profile_dir,
                     headless=False,  # VNC 可见
@@ -342,13 +360,27 @@ class BrowserManager:
                     timezone_id="America/New_York",
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     proxy=proxy,
-                    args=BROWSER_ARGS[:6],  # 登录时不用单进程模式
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--disable-dev-shm-usage",
+                        "--no-first-run",
+                        "--no-default-browser-check",
+                    ],
                     ignore_default_args=["--enable-automation"],
                 )
                 self._active_profile_id = profile_id
 
                 page = self._active_context.pages[0] if self._active_context.pages else await self._active_context.new_page()
                 await page.goto(config.login_url, wait_until="networkidle")
+
+                # 如果配置了 Gemini API，也打开 gemini.google.com 让用户顺便登录
+                if config.gemini_api_url:
+                    try:
+                        gemini_page = await self._active_context.new_page()
+                        await gemini_page.goto(config.gemini_login_url, wait_until="domcontentloaded", timeout=30000)
+                        logger.info(f"[{profile['name']}] 已打开 Gemini 页面，请在 VNC 中同时完成登录")
+                    except Exception as e:
+                        logger.warning(f"[{profile['name']}] 打开 Gemini 页面失败: {e}")
 
                 logger.info(f"[{profile['name']}] 浏览器已启动，请通过 VNC 登录")
                 return True
@@ -364,7 +396,7 @@ class BrowserManager:
                 return {"success": False, "error": "该 Profile 浏览器未运行"}
 
             if self._active_context:
-                # 检查登录状态
+                # 检查 labs.google 登录状态
                 is_logged_in = False
                 try:
                     cookies = await self._active_context.cookies("https://labs.google")
@@ -372,29 +404,46 @@ class BrowserManager:
                 except Exception:
                     pass
 
-                await profile_db.update_profile(profile_id, is_logged_in=int(is_logged_in))
+                # 检查 gemini 登录状态
+                gemini_logged_in = False
+                try:
+                    gemini_cookies = await self._get_gemini_cookies(self._active_context)
+                    gemini_logged_in = bool(gemini_cookies.get("psid"))
+                except Exception:
+                    pass
+
+                await profile_db.update_profile(profile_id, is_logged_in=int(is_logged_in or gemini_logged_in))
                 await self._close_active()
                 await self._stop_vnc_stack()
 
-                status = "已登录" if is_logged_in else "未登录"
+                status_parts = []
+                if is_logged_in:
+                    status_parts.append("Labs 已登录")
+                if gemini_logged_in:
+                    status_parts.append("Gemini 已登录")
+                status = ", ".join(status_parts) if status_parts else "未登录"
                 logger.info(f"Profile {profile_id} 浏览器已关闭，状态: {status}")
-                return {"success": True, "is_logged_in": is_logged_in}
+                return {"success": True, "is_logged_in": is_logged_in or gemini_logged_in}
 
             return {"success": True}
 
-    async def extract_token(self, profile_id: int) -> Optional[str]:
-        """提取 Token（Headless 模式，使用持久化上下文）"""
+    async def extract_token(self, profile_id: int) -> Dict[str, Any]:
+        """提取 Token（Headless 模式，使用持久化上下文）
+        
+        Returns:
+            {"flow2api_token": str|None, "gemini_cookies": {"psid": str, "psidts": str}|{}}
+        """
         async with self._lock:
             profile = await profile_db.get_profile(profile_id)
             if not profile:
-                return None
+                return {"flow2api_token": None, "gemini_cookies": {}}
 
             profile_dir = self._get_profile_dir(profile_id)
 
             # 检查是否有持久化数据
             if not os.path.exists(profile_dir):
                 logger.warning(f"[{profile['name']}] 无持久化数据，请先登录")
-                return None
+                return {"flow2api_token": None, "gemini_cookies": {}}
 
             # 如果当前 profile 浏览器正在运行（VNC 登录中），直接提取
             if self._active_profile_id == profile_id and self._active_context:
@@ -425,12 +474,12 @@ class BrowserManager:
                     ignore_default_args=["--enable-automation"],
                 )
 
-                token = await self._extract_from_context(profile, context)
-                return token
+                result = await self._extract_from_context(profile, context)
+                return result
 
             except Exception as e:
                 logger.error(f"[{profile['name']}] 提取失败: {e}")
-                return None
+                return {"flow2api_token": None, "gemini_cookies": {}}
             finally:
                 if context:
                     try:
@@ -439,9 +488,10 @@ class BrowserManager:
                         pass
                     logger.info(f"[{profile['name']}] Headless 浏览器已关闭")
 
-    async def _extract_from_context(self, profile: Dict[str, Any], context: BrowserContext) -> Optional[str]:
-        """从上下文提取 Token（通过 signin 页面刷新 session）"""
+    async def _extract_from_context(self, profile: Dict[str, Any], context: BrowserContext) -> Dict[str, Any]:
+        """从上下文提取 Token（通过 signin 页面刷新 session）+ Gemini Cookie"""
         page = None
+        result = {"flow2api_token": None, "gemini_cookies": {}}
         try:
             page = await context.new_page()
 
@@ -505,16 +555,56 @@ class BrowserManager:
                     last_token=self._mask_token(token),
                     last_token_time=datetime.now().isoformat(),
                 )
-                logger.info(f"[{profile['name']}] Token 提取成功")
+                logger.info(f"[{profile['name']}] Flow2API Token 提取成功")
+                result["flow2api_token"] = token
             else:
-                await profile_db.update_profile(profile["id"], is_logged_in=0)
-                logger.warning(f"[{profile['name']}] 未找到 Token，会话可能已过期")
+                logger.warning(f"[{profile['name']}] 未找到 Flow2API Token")
 
-            return token
+            # 提取 Gemini Cookie（如果配置了 Gemini API）
+            if config.gemini_api_url:
+                try:
+                    # 先访问 gemini.google.com 刷新 cookie
+                    await page.goto(config.gemini_login_url, wait_until="domcontentloaded", timeout=30000)
+                    # 轮询等待 __Secure-1PSID 和 __Secure-1PSIDTS 都出现
+                    gemini_cookies = {}
+                    gemini_deadline = asyncio.get_running_loop().time() + 15.0
+                    while asyncio.get_running_loop().time() < gemini_deadline:
+                        gemini_cookies = await self._get_gemini_cookies(context)
+                        if gemini_cookies.get("psid") and gemini_cookies.get("psidts"):
+                            break
+                        await asyncio.sleep(1)
+
+                    # 最后再试一次
+                    if not (gemini_cookies.get("psid") and gemini_cookies.get("psidts")):
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=8000)
+                        except Exception:
+                            pass
+                        gemini_cookies = await self._get_gemini_cookies(context)
+
+                except Exception as e:
+                    logger.warning(f"[{profile['name']}] 访问 Gemini 页面失败: {e}")
+                    gemini_cookies = {}
+
+                if gemini_cookies.get("psid") and gemini_cookies.get("psidts"):
+                    result["gemini_cookies"] = gemini_cookies
+                    logger.info(f"[{profile['name']}] Gemini Cookie 提取成功 (PSID: {self._mask_token(gemini_cookies['psid'])})")
+                elif gemini_cookies.get("psid"):
+                    logger.warning(f"[{profile['name']}] 只找到 __Secure-1PSID，缺少 __Secure-1PSIDTS，跳过推送")
+                else:
+                    logger.warning(f"[{profile['name']}] 未找到 Gemini Cookie")
+
+            # 更新登录状态
+            has_any_token = bool(result["flow2api_token"]) or bool(result["gemini_cookies"].get("psid"))
+            if not has_any_token:
+                await profile_db.update_profile(profile["id"], is_logged_in=0)
+                logger.warning(f"[{profile['name']}] 未找到任何 Token，会话可能已过期")
+
+            return result
 
         except Exception as e:
             logger.error(f"[{profile['name']}] 提取异常: {e}")
-            return None
+            return result
         finally:
             if page:
                 try:
@@ -523,16 +613,67 @@ class BrowserManager:
                     pass
 
     async def check_login_status(self, profile_id: int) -> Dict[str, Any]:
-        """检查登录状态"""
+        """检查登录状态（单次浏览器启动，同时检查两种 cookie）"""
         profile = await profile_db.get_profile(profile_id)
         if not profile:
             return {"success": False, "error": "Profile 不存在"}
 
-        token = await self.peek_token(profile_id)
-        await profile_db.update_profile(profile_id, is_logged_in=1 if token else 0)
+        has_flow2api = False
+        has_gemini = False
+
+        async with self._lock:
+            profile_dir = self._get_profile_dir(profile_id)
+            if not os.path.exists(profile_dir):
+                await profile_db.update_profile(profile_id, is_logged_in=0)
+                return {
+                    "success": True, "is_logged_in": False,
+                    "has_flow2api_token": False, "has_gemini_cookie": False,
+                    "profile_name": profile["name"]
+                }
+
+            # 如果当前 profile 浏览器正在运行，直接读取
+            if self._active_profile_id == profile_id and self._active_context:
+                has_flow2api = bool(await self._get_session_cookie(self._active_context))
+                gemini_cookies = await self._get_gemini_cookies(self._active_context)
+                has_gemini = bool(gemini_cookies.get("psid"))
+            else:
+                # 单次启动 headless 浏览器，同时检查两种 cookie
+                context = None
+                try:
+                    if not self._playwright:
+                        await self.start()
+                    self._clean_locks(profile_dir)
+                    proxy = await self._get_proxy(profile)
+                    context = await self._playwright.chromium.launch_persistent_context(
+                        user_data_dir=profile_dir,
+                        headless=True,
+                        viewport={"width": 1024, "height": 768},
+                        locale="en-US",
+                        timezone_id="America/New_York",
+                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        proxy=proxy,
+                        args=BROWSER_ARGS,
+                        ignore_default_args=["--enable-automation"],
+                    )
+                    has_flow2api = bool(await self._get_session_cookie(context))
+                    gemini_cookies = await self._get_gemini_cookies(context)
+                    has_gemini = bool(gemini_cookies.get("psid"))
+                except Exception:
+                    pass
+                finally:
+                    if context:
+                        try:
+                            await context.close()
+                        except Exception:
+                            pass
+
+        is_logged_in = has_flow2api or has_gemini
+        await profile_db.update_profile(profile_id, is_logged_in=1 if is_logged_in else 0)
         return {
             "success": True,
-            "is_logged_in": token is not None,
+            "is_logged_in": is_logged_in,
+            "has_flow2api_token": has_flow2api,
+            "has_gemini_cookie": has_gemini,
             "profile_name": profile["name"]
         }
 
@@ -571,6 +712,48 @@ class BrowserManager:
                 return await self._get_session_cookie(context)
             except Exception:
                 return None
+            finally:
+                if context:
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass
+
+    async def peek_gemini_cookies(self, profile_id: int) -> Dict[str, str]:
+        """轻量获取 Gemini cookie（不访问页面，仅读取 cookie）"""
+        async with self._lock:
+            profile = await profile_db.get_profile(profile_id)
+            if not profile:
+                return {}
+
+            profile_dir = self._get_profile_dir(profile_id)
+            if not os.path.exists(profile_dir):
+                return {}
+
+            if self._active_profile_id == profile_id and self._active_context:
+                return await self._get_gemini_cookies(self._active_context)
+
+            context = None
+            try:
+                if not self._playwright:
+                    await self.start()
+
+                self._clean_locks(profile_dir)
+                proxy = await self._get_proxy(profile)
+                context = await self._playwright.chromium.launch_persistent_context(
+                    user_data_dir=profile_dir,
+                    headless=True,
+                    viewport={"width": 1024, "height": 768},
+                    locale="en-US",
+                    timezone_id="America/New_York",
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    proxy=proxy,
+                    args=BROWSER_ARGS,
+                    ignore_default_args=["--enable-automation"],
+                )
+                return await self._get_gemini_cookies(context)
+            except Exception:
+                return {}
             finally:
                 if context:
                     try:
