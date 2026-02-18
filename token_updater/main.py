@@ -9,14 +9,17 @@ from .updater import token_syncer
 from .database import profile_db
 from .config import config
 from .logger import logger
+from .gcli2api_bridge import gcli2api_bridge
 
 
 scheduler = AsyncIOScheduler()
 SYNC_JOB_ID = "token_sync"
+GEMINI_SYNC_JOB_ID = "gemini_sync"
+GCLI2API_SYNC_JOB_ID = "gcli2api_sync"
 
 
 async def scheduled_sync():
-    """定时同步任务"""
+    """定时同步任务（Flow2API + Gemini 联合）"""
     logger.info("=== 定时同步任务触发 ===")
 
     if not config.connection_token:
@@ -29,6 +32,36 @@ async def scheduled_sync():
         return
 
     await token_syncer.sync_all_profiles()
+
+
+async def scheduled_gemini_sync():
+    """Gemini 独立定时同步任务"""
+    if not config.gemini_api_url:
+        return
+
+    logger.info("=== Gemini 定时同步任务触发 ===")
+
+    profiles = await profile_db.get_logged_in_profiles()
+    if not profiles:
+        logger.warning("没有已登录的 Profile，跳过 Gemini 同步")
+        return
+
+    await token_syncer.sync_all_gemini()
+
+
+async def scheduled_gcli2api_sync():
+    """gcli2api 定时同步任务"""
+    if not config.gcli2api_url:
+        return
+
+    logger.info("=== gcli2api 定时同步任务触发 ===")
+
+    profiles = await profile_db.get_logged_in_profiles()
+    if not profiles:
+        logger.warning("没有已登录的 Profile，跳过 gcli2api 同步")
+        return
+
+    await gcli2api_bridge.sync_all_to_gcli2api()
 
 
 async def startup():
@@ -49,10 +82,37 @@ async def startup():
         coalesce=True,
         replace_existing=True
     )
+
+    # Gemini 独立定时任务
+    if config.gemini_api_url:
+        scheduler.add_job(
+            scheduled_gemini_sync,
+            trigger=IntervalTrigger(minutes=config.gemini_refresh_interval),
+            id=GEMINI_SYNC_JOB_ID,
+            max_instances=1,
+            coalesce=True,
+            replace_existing=True,
+        )
+        logger.info(f"Gemini 定时任务已启动: 每 {config.gemini_refresh_interval} 分钟执行一次")
+
+    # gcli2api 定时任务
+    if config.gcli2api_url:
+        scheduler.add_job(
+            scheduled_gcli2api_sync,
+            trigger=IntervalTrigger(minutes=config.gcli2api_refresh_interval),
+            id=GCLI2API_SYNC_JOB_ID,
+            max_instances=1,
+            coalesce=True,
+            replace_existing=True,
+        )
+        logger.info(f"gcli2api 定时任务已启动: 每 {config.gcli2api_refresh_interval} 分钟执行一次")
+
     scheduler.start()
 
     app.state.scheduler = scheduler
     app.state.sync_job_id = SYNC_JOB_ID
+    app.state.gemini_sync_job_id = GEMINI_SYNC_JOB_ID
+    app.state.gcli2api_sync_job_id = GCLI2API_SYNC_JOB_ID
 
     logger.info(f"定时任务已启动: 每 {config.refresh_interval} 分钟执行一次")
     logger.info(f"Flow2API URL: {config.flow2api_url}")

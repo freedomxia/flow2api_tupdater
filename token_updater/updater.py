@@ -343,7 +343,93 @@ class TokenSyncer:
             "has_connection_token": bool(config.connection_token),
             "gemini_api_url": config.gemini_api_url,
             "has_gemini_connection_token": bool(config.gemini_connection_token),
-            "refresh_interval_minutes": config.refresh_interval
+            "refresh_interval_minutes": config.refresh_interval,
+            "gemini_refresh_interval_minutes": config.gemini_refresh_interval,
+        }
+
+    async def sync_gemini_only(self, profile_id: int) -> Dict[str, Any]:
+        """单独同步 Gemini cookie（先 RotateCookies，失败再开浏览器）"""
+        profile = await profile_db.get_profile(profile_id)
+        if not profile:
+            return {"success": False, "error": "Profile 不存在"}
+
+        if not config.gemini_api_url:
+            return {"success": False, "error": "未配置 Gemini API 地址"}
+
+        logger.info(f"[{profile['name']}] 开始 Gemini 单独同步...")
+
+        gemini_cookies = await browser_manager.extract_gemini_only(profile_id)
+
+        if not (gemini_cookies.get("psid") and gemini_cookies.get("psidts")):
+            self._gemini_error_count += 1
+            await profile_db.update_profile(
+                profile_id,
+                last_sync_time=datetime.now().isoformat(),
+                last_sync_result="failed: gemini no cookie",
+                error_count=profile.get("error_count", 0) + 1,
+            )
+            return {"success": False, "error": "无法提取 Gemini Cookie"}
+
+        result = await self._push_to_gemini_api(gemini_cookies, profile.get("name", ""))
+
+        if result.get("success"):
+            self._gemini_sync_count += 1
+            await profile_db.update_profile(
+                profile_id,
+                last_sync_time=datetime.now().isoformat(),
+                last_sync_result="success: gemini",
+                sync_count=profile.get("sync_count", 0) + 1,
+            )
+            logger.info(f"[{profile['name']}] Gemini 同步成功")
+        else:
+            self._gemini_error_count += 1
+            await profile_db.update_profile(
+                profile_id,
+                last_sync_time=datetime.now().isoformat(),
+                last_sync_result=f"failed: gemini {result.get('error', 'unknown')}",
+                error_count=profile.get("error_count", 0) + 1,
+            )
+            logger.error(f"[{profile['name']}] Gemini 同步失败: {result.get('error')}")
+
+        return result
+
+    async def sync_all_gemini(self) -> Dict[str, Any]:
+        """批量同步所有 profile 的 Gemini cookie"""
+        if not config.gemini_api_url:
+            return {"success": False, "error": "未配置 Gemini API 地址"}
+
+        logger.info("=" * 40)
+        logger.info("开始 Gemini 批量同步...")
+
+        profiles = await profile_db.get_active_profiles()
+        if not profiles:
+            logger.info("没有活跃的 Profile")
+            return {"success": True, "total": 0, "synced": 0}
+
+        results = []
+        success_count = 0
+        error_count = 0
+
+        for profile in profiles:
+            result = await self.sync_gemini_only(profile["id"])
+            results.append({
+                "profile_id": profile["id"],
+                "profile_name": profile["name"],
+                **result,
+            })
+            if result.get("success"):
+                success_count += 1
+            else:
+                error_count += 1
+
+        logger.info(f"Gemini 批量同步完成: 成功 {success_count}, 失败 {error_count}")
+
+        return {
+            "success": True,
+            "total": len(profiles),
+            "success_count": success_count,
+            "error_count": error_count,
+            "results": results,
         }
 
 

@@ -29,7 +29,7 @@
         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 32px; flex-wrap: wrap; gap: 12px; }
         .header h1 { font-size: 24px; font-weight: 600; }
         .header-actions { display: flex; gap: 12px; }
-        .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 32px; }
+        .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 32px; }
         @media (max-width: 768px) { .stats { grid-template-columns: repeat(2, 1fr); } }
         .stat-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
         .stat-card .label { font-size: 13px; color: var(--muted); margin-bottom: 4px; }
@@ -165,6 +165,8 @@ function renderMain() {
         <div class="stat-card"><div class="label">Flow2API 失败</div><div class="value yellow" id="s-flow-err">0</div></div>
         <div class="stat-card"><div class="label">Gemini 成功</div><div class="value green" id="s-gem-sync">0</div></div>
         <div class="stat-card"><div class="label">Gemini 失败</div><div class="value yellow" id="s-gem-err">0</div></div>
+        <div class="stat-card"><div class="label">gcli2api 成功</div><div class="value green" id="s-gcli-sync">0</div></div>
+        <div class="stat-card"><div class="label">gcli2api 失败</div><div class="value yellow" id="s-gcli-err">0</div></div>
     </div>
     <div class="card">
         <div class="card-header">
@@ -182,6 +184,15 @@ function renderMain() {
                 <div class="config-grid">
                     <div class="form-group"><label>Gemini API 地址</label><input id="c-gemini-url" placeholder="http://host:port"></div>
                     <div class="form-group"><label>Gemini 连接 Token</label><input type="password" id="c-gemini-token"></div>
+                    <div class="form-group"><label>Gemini 刷新间隔(分钟)</label><input type="number" id="c-gemini-int" min="1" max="1440" value="30"></div>
+                </div>
+            </div>
+            <div style="border-top:1px solid var(--border);margin:16px 0;padding-top:16px">
+                <div style="font-size:13px;color:var(--muted);margin-bottom:12px">🔗 gcli2api 联动（可选，自动补充 OAuth 凭证）</div>
+                <div class="config-grid">
+                    <div class="form-group"><label>gcli2api 地址</label><input id="c-gcli-url" placeholder="http://host:7861"></div>
+                    <div class="form-group"><label>gcli2api 密码</label><input type="password" id="c-gcli-pwd"></div>
+                    <div class="form-group"><label>gcli2api 刷新间隔(分钟)</label><input type="number" id="c-gcli-int" min="1" max="1440" value="360"></div>
                 </div>
             </div>
         </div>
@@ -191,6 +202,8 @@ function renderMain() {
             <h2>👤 Profiles</h2>
             <div style="display:flex;gap:8px">
                 <button class="btn btn-success btn-sm" onclick="syncAll()">🔄 同步全部</button>
+                <button class="btn btn-warning btn-sm" onclick="syncAllGemini()">🤖 Gemini全部</button>
+                <button class="btn btn-ghost btn-sm" id="gcli-all-btn" onclick="syncAllGcli2api()">🔗 gcli2api全部</button>
                 <button class="btn btn-primary btn-sm" onclick="showModal()">+ 新建</button>
             </div>
         </div>
@@ -217,12 +230,24 @@ async function load() {
         document.getElementById('s-flow-err').textContent = st.syncer.flow2api_error_count || 0;
         document.getElementById('s-gem-sync').textContent = st.syncer.gemini_sync_count || 0;
         document.getElementById('s-gem-err').textContent = st.syncer.gemini_error_count || 0;
+        // gcli2api 状态
+        try {
+            const gcliSt = await api(`${API}/api/gcli2api-status`).then(r => r.json());
+            document.getElementById('s-gcli-sync').textContent = gcliSt.sync_count || 0;
+            document.getElementById('s-gcli-err').textContent = gcliSt.error_count || 0;
+            const gcliBtn = document.getElementById('gcli-all-btn');
+            if (gcliBtn) gcliBtn.classList.toggle('hidden', !gcliSt.enabled);
+        } catch (e) {}
         const cfg = await api(`${API}/api/config`).then(r => r.json());
         document.getElementById('c-url').value = cfg.flow2api_url || '';
         document.getElementById('c-int').value = cfg.refresh_interval || 60;
         if (cfg.connection_token_preview) document.getElementById('c-token').placeholder = cfg.connection_token_preview;
         document.getElementById('c-gemini-url').value = cfg.gemini_api_url || '';
         if (cfg.gemini_connection_token_preview) document.getElementById('c-gemini-token').placeholder = cfg.gemini_connection_token_preview;
+        document.getElementById('c-gemini-int').value = cfg.gemini_refresh_interval || 30;
+        document.getElementById('c-gcli-url').value = cfg.gcli2api_url || '';
+        if (cfg.has_gcli2api_password) document.getElementById('c-gcli-pwd').placeholder = '••••••••';
+        document.getElementById('c-gcli-int').value = cfg.gcli2api_refresh_interval || 360;
         const ps = await api(`${API}/api/profiles`).then(r => r.json());
         renderProfiles(ps);
     } catch (e) { if (e.message !== 'expired') console.error(e); }
@@ -260,6 +285,9 @@ function renderProfiles(ps) {
                 <button class="btn btn-ghost btn-sm" onclick="showCookieModal(${p.id})">🍪 Cookie</button>
                 <button class="btn btn-ghost btn-sm" onclick="checkLogin(${p.id})">检测</button>
                 <button class="btn btn-warning btn-sm" onclick="syncProfile(${p.id})">🔄</button>
+                <button class="btn btn-ghost btn-sm" onclick="syncGemini(${p.id})">🤖</button>
+                <button class="btn btn-ghost btn-sm" onclick="syncGcli2api(${p.id})">🔗 GCli</button>
+                <button class="btn btn-ghost btn-sm" onclick="syncGcli2api(${p.id},'antigravity')">🔗 AG</button>
                 <button class="btn btn-ghost btn-sm" onclick="showModal(${p.id})">✏️</button>
                 <button class="btn btn-danger btn-sm" onclick="delProfile(${p.id},'${p.name}')">🗑️</button>
             </div>`;
@@ -284,6 +312,23 @@ async function saveConfig() {
     }
     body.gemini_api_url = geminiUrl;
     if (geminiTk) body.gemini_connection_token = geminiTk;
+    const geminiInt = document.getElementById('c-gemini-int').value;
+    if (geminiInt) {
+        const gv = parseInt(geminiInt, 10);
+        if (gv < 1 || gv > 1440) { toast('Gemini 刷新间隔需在 1-1440 分钟之间', 'error'); return; }
+        body.gemini_refresh_interval = gv;
+    }
+    // gcli2api
+    const gcliUrl = document.getElementById('c-gcli-url').value.trim();
+    const gcliPwd = document.getElementById('c-gcli-pwd').value;
+    const gcliInt = document.getElementById('c-gcli-int').value;
+    body.gcli2api_url = gcliUrl;
+    if (gcliPwd) body.gcli2api_password = gcliPwd;
+    if (gcliInt) {
+        const cv = parseInt(gcliInt, 10);
+        if (cv < 1 || cv > 1440) { toast('gcli2api 刷新间隔需在 1-1440 分钟之间', 'error'); return; }
+        body.gcli2api_refresh_interval = cv;
+    }
     await api(`${API}/api/config`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     toast('已保存', 'success');
 }
@@ -300,6 +345,12 @@ function showModal(id = null) {
         <div class="form-group"><label>名称</label><input id="m-name"></div>
         <div class="form-group"><label>备注</label><input id="m-remark"></div>
         <div class="form-group"><label>代理 (可选)</label><input id="m-proxy" placeholder="http://user:pass@host:port"></div>
+        <div style="border-top:1px solid var(--border);margin:16px 0;padding-top:16px">
+            <div style="font-size:13px;color:var(--muted);margin-bottom:12px">🔐 Google 自动登录（可选）</div>
+            <div class="form-group"><label>Google 邮箱</label><input id="m-google-email" placeholder="example@gmail.com"></div>
+            <div class="form-group"><label>Google 密码</label><input type="password" id="m-google-password" placeholder="留空则不修改"></div>
+            <div class="form-group"><label>TOTP 密钥</label><input type="password" id="m-totp-secret" placeholder="base32 编码，如 5j4k42oczl..."></div>
+        </div>
         <div class="modal-footer">
             <button class="btn btn-ghost" onclick="hideModal()">取消</button>
             <button class="btn btn-primary" onclick="saveProfile()">${id ? '保存' : '创建'}</button>
@@ -312,6 +363,9 @@ async function loadProfile(id) {
     document.getElementById('m-name').value = p.name || '';
     document.getElementById('m-remark').value = p.remark || '';
     document.getElementById('m-proxy').value = p.proxy_url || '';
+    document.getElementById('m-google-email').value = p.google_email || '';
+    if (p.has_google_password) document.getElementById('m-google-password').placeholder = '••••••••（已设置）';
+    if (p.has_totp_secret) document.getElementById('m-totp-secret').placeholder = '••••••••（已设置）';
 }
 
 function hideModal() { document.getElementById('modal').classList.remove('show'); editId = null; cookieId = null; }
@@ -320,11 +374,18 @@ async function saveProfile() {
     const n = document.getElementById('m-name').value.trim();
     const r = document.getElementById('m-remark').value.trim();
     const px = document.getElementById('m-proxy').value.trim();
+    const ge = document.getElementById('m-google-email').value.trim();
+    const gp = document.getElementById('m-google-password').value;
+    const ts = document.getElementById('m-totp-secret').value;
     if (!n) { toast('请输入名称', 'error'); return; }
+    const body = { name: n, remark: r, proxy_url: px, google_email: ge };
+    if (gp) body.google_password = gp;
+    if (ts) body.totp_secret = ts;
     if (editId) {
-        await api(`${API}/api/profiles/${editId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: n, remark: r, proxy_url: px, proxy_enabled: !!px }) });
+        body.proxy_enabled = !!px;
+        await api(`${API}/api/profiles/${editId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     } else {
-        await api(`${API}/api/profiles`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: n, remark: r, proxy_url: px }) });
+        await api(`${API}/api/profiles`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     }
     hideModal(); load();
     toast(editId ? '已保存' : '已创建', 'success');
@@ -401,7 +462,12 @@ async function closeBrowser(id) {
 async function checkLogin(id) {
     toast('检测中...', 'success');
     const r = await api(`${API}/api/profiles/${id}/check-login`, { method: 'POST' }).then(r => r.json());
-    toast(r.is_logged_in ? '已登录 ✓' : '未登录或已过期', r.is_logged_in ? 'success' : 'error');
+    let msg = '';
+    if (r.has_flow2api_token && r.has_gemini_cookie) msg = 'Labs + Gemini 已登录 ✓';
+    else if (r.has_flow2api_token) msg = 'Labs 已登录 ✓（Gemini 未登录）';
+    else if (r.has_gemini_cookie) msg = 'Gemini 已登录 ✓（Labs 未登录）';
+    else msg = '未登录或已过期';
+    toast(msg, r.is_logged_in ? 'success' : 'error');
     load();
 }
 
@@ -416,6 +482,35 @@ async function syncAll() {
     toast('同步全部...', 'success');
     const r = await api(`${API}/api/sync-all`, { method: 'POST' }).then(r => r.json());
     toast(`完成: ${r.success_count}成功, ${r.error_count}失败`, 'success');
+    load();
+}
+
+async function syncGemini(id) {
+    toast('Gemini 同步中...', 'success');
+    const r = await api(`${API}/api/profiles/${id}/sync-gemini`, { method: 'POST' }).then(r => r.json());
+    toast(r.success ? 'Gemini 同步成功' : r.error || 'Gemini 同步失败', r.success ? 'success' : 'error');
+    load();
+}
+
+async function syncAllGemini() {
+    toast('Gemini 全部同步中...', 'success');
+    const r = await api(`${API}/api/sync-all-gemini`, { method: 'POST' }).then(r => r.json());
+    toast(`Gemini 完成: ${r.success_count}成功, ${r.error_count}失败`, 'success');
+    load();
+}
+
+async function syncGcli2api(id, mode = 'geminicli') {
+    const label = mode === 'antigravity' ? 'Antigravity' : 'GeminiCLI';
+    toast(`gcli2api ${label} 授权中...`, 'success');
+    const r = await api(`${API}/api/profiles/${id}/sync-gcli2api?mode=${mode}`, { method: 'POST' }).then(r => r.json());
+    toast(r.success ? `gcli2api ${label} 授权成功` : r.error || `gcli2api ${label} 授权失败`, r.success ? 'success' : 'error');
+    load();
+}
+
+async function syncAllGcli2api() {
+    toast('gcli2api 全部授权中 (GeminiCLI + Antigravity)...', 'success');
+    const r = await api(`${API}/api/sync-all-gcli2api?mode=both`, { method: 'POST' }).then(r => r.json());
+    toast(`gcli2api 完成: ${r.success_count}成功, ${r.error_count}失败`, 'success');
     load();
 }
 

@@ -44,15 +44,22 @@ class ProfileDB:
                 await db.execute("ALTER TABLE profiles ADD COLUMN proxy_url TEXT")
             if 'proxy_enabled' not in columns:
                 await db.execute("ALTER TABLE profiles ADD COLUMN proxy_enabled INTEGER DEFAULT 0")
+            if 'google_email' not in columns:
+                await db.execute("ALTER TABLE profiles ADD COLUMN google_email TEXT")
+            if 'google_password' not in columns:
+                await db.execute("ALTER TABLE profiles ADD COLUMN google_password TEXT")
+            if 'totp_secret' not in columns:
+                await db.execute("ALTER TABLE profiles ADD COLUMN totp_secret TEXT")
             
             await db.commit()
     
-    async def add_profile(self, name: str, remark: str = "", proxy_url: str = "") -> int:
+    async def add_profile(self, name: str, remark: str = "", proxy_url: str = "",
+                         google_email: str = "", google_password: str = "", totp_secret: str = "") -> int:
         """添加 profile"""
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute(
-                "INSERT INTO profiles (name, remark, proxy_url, proxy_enabled, created_at) VALUES (?, ?, ?, ?, ?)",
-                (name, remark, proxy_url, 1 if proxy_url else 0, datetime.now().isoformat())
+                "INSERT INTO profiles (name, remark, proxy_url, proxy_enabled, google_email, google_password, totp_secret, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (name, remark, proxy_url, 1 if proxy_url else 0, google_email or None, google_password or None, totp_secret or None, datetime.now().isoformat())
             )
             await db.commit()
             return cursor.lastrowid

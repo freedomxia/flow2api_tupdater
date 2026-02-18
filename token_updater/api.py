@@ -1,4 +1,4 @@
-﻿"""Token Updater API v3.1"""
+"""Token Updater API v3.1"""
 import secrets
 import time
 from apscheduler.triggers.interval import IntervalTrigger
@@ -13,6 +13,7 @@ from .database import profile_db
 from .proxy_utils import validate_proxy_format
 from .config import config
 from .logger import logger
+from .gcli2api_bridge import gcli2api_bridge
 
 app = FastAPI(title="Flow2API Token Updater", version="3.1.0")
 
@@ -79,6 +80,12 @@ class CreateProfileRequest(BaseModel):
     name: str
     remark: Optional[str] = ""
     proxy_url: Optional[str] = ""
+    google_email: Optional[str] = ""
+    google_password: Optional[str] = ""
+    totp_secret: Optional[str] = ""
+    google_email: Optional[str] = ""
+    google_password: Optional[str] = ""
+    totp_secret: Optional[str] = ""
 
 class UpdateProfileRequest(BaseModel):
     name: Optional[str] = None
@@ -86,6 +93,9 @@ class UpdateProfileRequest(BaseModel):
     is_active: Optional[bool] = None
     proxy_url: Optional[str] = None
     proxy_enabled: Optional[bool] = None
+    google_email: Optional[str] = None
+    google_password: Optional[str] = None
+    totp_secret: Optional[str] = None
 
 class UpdateConfigRequest(BaseModel):
     flow2api_url: Optional[str] = None
@@ -93,6 +103,10 @@ class UpdateConfigRequest(BaseModel):
     refresh_interval: Optional[int] = None
     gemini_api_url: Optional[str] = None
     gemini_connection_token: Optional[str] = None
+    gemini_refresh_interval: Optional[int] = None
+    gcli2api_url: Optional[str] = None
+    gcli2api_password: Optional[str] = None
+    gcli2api_refresh_interval: Optional[int] = None
 
 class ImportCookiesRequest(BaseModel):
     cookies_json: str
@@ -169,9 +183,19 @@ async def get_status(token: str = Depends(verify_session)):
             "enable_vnc": bool(config.enable_vnc),
             "gemini_api_url": config.gemini_api_url,
             "has_gemini_connection_token": bool(config.gemini_connection_token),
+            "gemini_refresh_interval": config.gemini_refresh_interval,
         },
         "version": "3.1.0"
     }
+
+
+def _sanitize_profile(p: dict) -> dict:
+    """脱敏 profile 中的敏感字段"""
+    p["has_google_password"] = bool(p.get("google_password"))
+    p["has_totp_secret"] = bool(p.get("totp_secret"))
+    p.pop("google_password", None)
+    p.pop("totp_secret", None)
+    return p
 
 
 # Profiles
@@ -185,6 +209,7 @@ async def get_profiles(token: str = Depends(verify_session)):
             valid, msg = validate_proxy_format(p["proxy_url"])
             p["proxy_status"] = msg
             p["proxy_valid"] = bool(valid)
+        _sanitize_profile(p)
     return profiles
 
 
@@ -195,7 +220,12 @@ async def create_profile(request: CreateProfileRequest, token: str = Depends(ver
     proxy_url = _validate_proxy(request.proxy_url or "")
     if await profile_db.get_profile_by_name(name):
         raise HTTPException(400, "名称已存在")
-    profile_id = await profile_db.add_profile(name, remark, proxy_url)
+    profile_id = await profile_db.add_profile(
+        name, remark, proxy_url,
+        google_email=request.google_email or "",
+        google_password=request.google_password or "",
+        totp_secret=request.totp_secret or "",
+    )
     return {"success": True, "profile_id": profile_id}
 
 
@@ -205,6 +235,7 @@ async def get_profile(profile_id: int, token: str = Depends(verify_session)):
     if not profile:
         raise HTTPException(404, "不存在")
     profile["is_browser_active"] = (profile_id == browser_manager.get_active_profile_id())
+    _sanitize_profile(profile)
     return profile
 
 
@@ -228,6 +259,12 @@ async def update_profile(profile_id: int, request: UpdateProfileRequest, token: 
         update_data["proxy_url"] = _validate_proxy(request.proxy_url)
     if request.proxy_enabled is not None:
         update_data["proxy_enabled"] = int(request.proxy_enabled)
+    if request.google_email is not None:
+        update_data["google_email"] = request.google_email
+    if request.google_password is not None:
+        update_data["google_password"] = request.google_password
+    if request.totp_secret is not None:
+        update_data["totp_secret"] = request.totp_secret
     if update_data:
         await profile_db.update_profile(profile_id, **update_data)
     return {"success": True}
@@ -301,6 +338,39 @@ async def sync_all(token: str = Depends(verify_session)):
     return await token_syncer.sync_all_profiles()
 
 
+@app.post("/api/profiles/{profile_id}/sync-gemini")
+async def sync_gemini(profile_id: int, token: str = Depends(verify_session)):
+    return await token_syncer.sync_gemini_only(profile_id)
+
+
+@app.post("/api/sync-all-gemini")
+async def sync_all_gemini(token: str = Depends(verify_session)):
+    return await token_syncer.sync_all_gemini()
+
+
+# gcli2api 桥接
+@app.post("/api/profiles/{profile_id}/sync-gcli2api")
+async def sync_gcli2api(profile_id: int, mode: str = "geminicli", token: str = Depends(verify_session)):
+    return await gcli2api_bridge.sync_profile_to_gcli2api(profile_id, mode=mode)
+
+
+@app.post("/api/profiles/{profile_id}/sync-gcli2api-both")
+async def sync_gcli2api_both(profile_id: int, token: str = Depends(verify_session)):
+    """同时同步 geminicli + antigravity 两种模式"""
+    return await gcli2api_bridge.sync_profile_both_modes(profile_id)
+
+
+@app.post("/api/sync-all-gcli2api")
+async def sync_all_gcli2api(mode: str = "both", token: str = Depends(verify_session)):
+    """同步所有 profile，mode 可选: geminicli, antigravity, both"""
+    return await gcli2api_bridge.sync_all_to_gcli2api(mode=mode)
+
+
+@app.get("/api/gcli2api-status")
+async def gcli2api_status(token: str = Depends(verify_session)):
+    return gcli2api_bridge.get_status()
+
+
 # Config
 @app.get("/api/config")
 async def get_config(token: str = Depends(verify_session)):
@@ -314,6 +384,10 @@ async def get_config(token: str = Depends(verify_session)):
         "gemini_api_url": config.gemini_api_url,
         "has_gemini_connection_token": bool(config.gemini_connection_token),
         "gemini_connection_token_preview": f"{config.gemini_connection_token[:10]}..." if config.gemini_connection_token else "",
+        "gemini_refresh_interval": config.gemini_refresh_interval,
+        "gcli2api_url": config.gcli2api_url,
+        "has_gcli2api_password": bool(config.gcli2api_password),
+        "gcli2api_refresh_interval": config.gcli2api_refresh_interval,
     }
 
 
@@ -335,6 +409,18 @@ async def update_config(request: UpdateConfigRequest, api_request: Request, toke
         config.gemini_api_url = request.gemini_api_url.strip()
     if request.gemini_connection_token is not None:
         config.gemini_connection_token = request.gemini_connection_token.strip()
+    if request.gemini_refresh_interval is not None:
+        if request.gemini_refresh_interval < 1 or request.gemini_refresh_interval > 1440:
+            raise HTTPException(400, "Gemini 刷新间隔需在 1-1440 分钟之间")
+        config.gemini_refresh_interval = request.gemini_refresh_interval
+    if request.gcli2api_url is not None:
+        config.gcli2api_url = request.gcli2api_url.strip()
+    if request.gcli2api_password is not None:
+        config.gcli2api_password = request.gcli2api_password.strip()
+    if request.gcli2api_refresh_interval is not None:
+        if request.gcli2api_refresh_interval < 1 or request.gcli2api_refresh_interval > 1440:
+            raise HTTPException(400, "gcli2api 刷新间隔需在 1-1440 分钟之间")
+        config.gcli2api_refresh_interval = request.gcli2api_refresh_interval
     config.save()
 
     if request.refresh_interval and config.refresh_interval != old_interval:
@@ -345,6 +431,25 @@ async def update_config(request: UpdateConfigRequest, api_request: Request, toke
                 scheduler.reschedule_job(job_id, trigger=IntervalTrigger(minutes=config.refresh_interval))
             except Exception as e:
                 logger.warning(f"更新定时任务失败: {e}")
+
+    if request.gemini_refresh_interval is not None:
+        scheduler = getattr(api_request.app.state, "scheduler", None)
+        gemini_job_id = getattr(api_request.app.state, "gemini_sync_job_id", "gemini_sync")
+        if scheduler:
+            try:
+                scheduler.reschedule_job(gemini_job_id, trigger=IntervalTrigger(minutes=config.gemini_refresh_interval))
+            except Exception as e:
+                logger.warning(f"更新 Gemini 定时任务失败: {e}")
+
+    if request.gcli2api_refresh_interval is not None:
+        scheduler = getattr(api_request.app.state, "scheduler", None)
+        gcli_job_id = getattr(api_request.app.state, "gcli2api_sync_job_id", "gcli2api_sync")
+        if scheduler:
+            try:
+                scheduler.reschedule_job(gcli_job_id, trigger=IntervalTrigger(minutes=config.gcli2api_refresh_interval))
+            except Exception as e:
+                logger.warning(f"更新 gcli2api 定时任务失败: {e}")
+
     return {"success": True}
 
 

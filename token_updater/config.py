@@ -5,7 +5,7 @@ import os
 from pydantic import BaseModel
 
 
-PERSIST_KEYS = ("flow2api_url", "connection_token", "refresh_interval", "gemini_api_url", "gemini_connection_token")
+PERSIST_KEYS = ("flow2api_url", "connection_token", "refresh_interval", "gemini_api_url", "gemini_connection_token", "gemini_refresh_interval", "gcli2api_url", "gcli2api_password")
 
 
 def _get_env(name: str) -> str | None:
@@ -61,6 +61,10 @@ class Config(BaseModel):
     gemini_api_url: str = ""
     gemini_connection_token: str = ""
     gemini_login_url: str = "https://gemini.google.com"
+    gemini_refresh_interval: int = 30
+    gcli2api_url: str = ""
+    gcli2api_password: str = ""
+    gcli2api_refresh_interval: int = 360
     api_port: int
     db_path: str = "/app/data/profiles.db"
     session_ttl_minutes: int
@@ -81,6 +85,10 @@ def _build_config() -> Config:
     enable_vnc = _parse_bool(_get_env("ENABLE_VNC"), default=True)
     gemini_api_url = _get_env("GEMINI_API_URL") or persisted.get("gemini_api_url", "")
     gemini_connection_token = _get_env("GEMINI_CONNECTION_TOKEN") or persisted.get("gemini_connection_token", "")
+    gemini_refresh_interval = _parse_int(_get_env("GEMINI_REFRESH_INTERVAL") or str(persisted.get("gemini_refresh_interval", 30)), 30)
+    gcli2api_url = _get_env("GCLI2API_URL") or persisted.get("gcli2api_url", "")
+    gcli2api_password = _get_env("GCLI2API_PASSWORD") or persisted.get("gcli2api_password", "")
+    gcli2api_refresh_interval = _parse_int(_get_env("GCLI2API_REFRESH_INTERVAL") or str(persisted.get("gcli2api_refresh_interval", 360)), 360)
 
     return Config(
         admin_password=_get_env("ADMIN_PASSWORD") or "",
@@ -91,6 +99,10 @@ def _build_config() -> Config:
         enable_vnc=enable_vnc,
         gemini_api_url=gemini_api_url,
         gemini_connection_token=gemini_connection_token,
+        gemini_refresh_interval=gemini_refresh_interval,
+        gcli2api_url=gcli2api_url,
+        gcli2api_password=gcli2api_password,
+        gcli2api_refresh_interval=gcli2api_refresh_interval,
         api_port=_parse_int(_get_env("API_PORT"), 8002),
         session_ttl_minutes=_parse_int(_get_env("SESSION_TTL_MINUTES"), 1440),
         config_file=config_file,

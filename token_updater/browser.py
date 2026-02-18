@@ -1,20 +1,24 @@
-﻿"""浏览器管理 v3.1 - 持久化上下文 + VNC登录 + Headless刷新"""
+"""浏览器管理 v3.1 - 持久化上下文 + VNC登录 + Headless刷新"""
 import asyncio
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
+import time
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from playwright.async_api import async_playwright, BrowserContext, Playwright
+import pyotp
 from .config import config
 from .database import profile_db
 from .proxy_utils import parse_proxy, format_proxy_for_playwright
 from .logger import logger
 
 
-# 内存优化参数（移除不安全标志以通过 Google 安全检测）
+# 内存优化 + 反自动化检测参数
 BROWSER_ARGS = [
+    "--disable-blink-features=AutomationControlled",
     "--no-sandbox",
     "--disable-dev-shm-usage",
     "--disable-gpu",
@@ -26,10 +30,81 @@ BROWSER_ARGS = [
     "--disable-features=TranslateUI",
     "--no-first-run",
     "--no-default-browser-check",
-    "--single-process",  # 单进程模式，省内存
-    "--max_old_space_size=128",  # 限制 V8 内存
+    "--renderer-process-limit=1",  # 限制渲染进程数（比 --single-process 更隐蔽）
+    "--max_old_space_size=128",
     "--js-flags=--max-old-space-size=128",
 ]
+
+# VNC 登录专用参数（更少限制，更像真人浏览器）
+VNC_BROWSER_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--disable-dev-shm-usage",
+    "--no-first-run",
+    "--no-default-browser-check",
+]
+
+# 更新到最新 Chrome 版本
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+
+# 常见 viewport 尺寸池（按 profile_id 确定性选取）
+VIEWPORT_POOL = [
+    {"width": 1920, "height": 1080},
+    {"width": 1366, "height": 768},
+    {"width": 1536, "height": 864},
+    {"width": 1440, "height": 900},
+    {"width": 1280, "height": 720},
+    {"width": 1600, "height": 900},
+    {"width": 1280, "height": 800},
+    {"width": 1024, "height": 768},
+]
+
+# Stealth 脚本：隐藏 Playwright/自动化痕迹
+STEALTH_JS = """
+// 隐藏 navigator.webdriver
+Object.defineProperty(navigator, 'webdriver', {
+    get: () => undefined,
+});
+
+// 补全 window.chrome（Headless 模式下缺失）
+if (!window.chrome) {
+    window.chrome = {};
+}
+if (!window.chrome.runtime) {
+    window.chrome.runtime = {};
+}
+
+// 伪造 plugins（Headless 默认为空）
+Object.defineProperty(navigator, 'plugins', {
+    get: () => {
+        return [
+            {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer'},
+            {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai'},
+            {name: 'Native Client', filename: 'internal-nacl-plugin'},
+        ];
+    },
+});
+
+// 伪造 languages
+Object.defineProperty(navigator, 'languages', {
+    get: () => ['en-US', 'en'],
+});
+
+// 覆盖 permissions.query 对 notifications 的响应
+const originalQuery = window.navigator.permissions.query;
+window.navigator.permissions.query = (parameters) => (
+    parameters.name === 'notifications'
+        ? Promise.resolve({state: Notification.permission})
+        : originalQuery(parameters)
+);
+
+// 隐藏 Playwright 注入的 __playwright 等全局变量
+delete window.__playwright;
+delete window.__pw_manual;
+"""
 
 BLOCKED_RESOURCE_TYPES = {"image", "media", "font", "stylesheet"}
 
@@ -55,6 +130,88 @@ class BrowserManager:
         self._playwright = await async_playwright().start()
         os.makedirs(config.profiles_dir, exist_ok=True)
         logger.info("Playwright 已启动")
+
+    def _get_viewport(self, profile_id: int) -> Dict[str, int]:
+        """按 profile_id 确定性选取 viewport（同一 profile 每次一致）"""
+        return VIEWPORT_POOL[profile_id % len(VIEWPORT_POOL)]
+
+    async def _inject_stealth(self, context: BrowserContext) -> None:
+        """注入反自动化检测脚本"""
+        try:
+            await context.add_init_script(STEALTH_JS)
+        except Exception as e:
+            logger.warning(f"注入 stealth 脚本失败: {e}")
+
+    @staticmethod
+    async def auto_google_login(page, profile: Dict[str, Any], timeout: float = 30.0) -> bool:
+        """在 Google 登录/2FA 页面自动填写凭据
+
+        通用方法，供 Flow2API token 刷新和 gcli2api OAuth 流程共用。
+        在循环中调用，每次处理一个步骤（邮箱/密码/TOTP），返回是否有操作。
+
+        Args:
+            page: Playwright page 对象
+            profile: 包含 google_email, google_password, totp_secret 的 profile dict
+            timeout: 不使用，保留兼容
+
+        Returns:
+            True 如果执行了某个操作，False 如果没有匹配的页面
+        """
+        cur_url = page.url
+        if "accounts.google.com" not in cur_url:
+            return False
+
+        # 邮箱填写
+        if profile.get("google_email"):
+            for email_sel in ['input[type="email"]', '#identifierId']:
+                el = page.locator(email_sel)
+                if await el.count() > 0 and await el.first.is_visible():
+                    await el.first.fill(profile["google_email"])
+                    logger.info(f"[{profile['name']}] 自动填入 Google 邮箱")
+                    for next_sel in ['#identifierNext', 'button:has-text("Next")', 'button:has-text("下一步")']:
+                        nb = page.locator(next_sel)
+                        if await nb.count() > 0 and await nb.first.is_visible():
+                            await nb.first.click()
+                            break
+                    await asyncio.sleep(3)
+                    return True
+
+        # 密码填写
+        if profile.get("google_password"):
+            for pwd_sel in ['input[type="password"]', 'input[name="Passwd"]']:
+                el = page.locator(pwd_sel)
+                if await el.count() > 0 and await el.first.is_visible():
+                    await el.first.fill(profile["google_password"])
+                    logger.info(f"[{profile['name']}] 自动填入 Google 密码")
+                    for next_sel in ['#passwordNext', 'button:has-text("Next")', 'button:has-text("下一步")']:
+                        nb = page.locator(next_sel)
+                        if await nb.count() > 0 and await nb.first.is_visible():
+                            await nb.first.click()
+                            break
+                    await asyncio.sleep(3)
+                    return True
+
+        # TOTP 验证码填写
+        if profile.get("totp_secret"):
+            for totp_sel in ['input[type="tel"]', 'input[name="totpPin"]', 'input[id="totpPin"]']:
+                el = page.locator(totp_sel)
+                if await el.count() > 0 and await el.first.is_visible():
+                    try:
+                        code = pyotp.TOTP(profile["totp_secret"]).now()
+                        await el.first.fill(code)
+                        logger.info(f"[{profile['name']}] 自动填入 TOTP 验证码")
+                        for next_sel in ['#totpNext', 'button:has-text("Next")', 'button:has-text("下一步")']:
+                            nb = page.locator(next_sel)
+                            if await nb.count() > 0 and await nb.first.is_visible():
+                                await nb.first.click()
+                                break
+                        await asyncio.sleep(3)
+                        return True
+                    except Exception as e:
+                        logger.warning(f"[{profile['name']}] TOTP 生成失败: {e}")
+                    break
+
+        return False
 
     async def stop(self):
         """停止"""
@@ -120,6 +277,10 @@ class BrowserManager:
         """关闭当前浏览器"""
         if self._active_context:
             try:
+                await self._persist_cookies_before_close(self._active_context)
+            except Exception:
+                pass
+            try:
                 await self._active_context.close()
             except Exception:
                 pass
@@ -147,6 +308,121 @@ class BrowserManager:
         if not token or len(token) <= 8:
             return token or ""
         return f"{token[:4]}...{token[-4:]}"
+
+    async def _persist_cookies_before_close(self, context: BrowserContext) -> None:
+        """在 context.close() 前，把 session cookie 转为 persistent cookie。
+        
+        Chromium 不会把没有 expires 的 session cookie 写入磁盘 SQLite，
+        导致 close 后 cookie 丢失。这里给所有 session cookie 加上 7 天过期时间，
+        让 Chromium 把它们当 persistent cookie 持久化。
+        """
+        try:
+            all_cookies = await context.cookies()
+            session_cookies = []
+            expires_future = time.time() + 7 * 86400  # 7 天后
+
+            for c in all_cookies:
+                # expires == -1 或 0 或不存在 → session cookie
+                exp = c.get("expires", -1)
+                if exp <= 0:
+                    cookie: Dict[str, Any] = {
+                        "name": c["name"],
+                        "value": c["value"],
+                        "path": c.get("path", "/"),
+                        "expires": expires_future,
+                    }
+                    if c.get("domain"):
+                        cookie["domain"] = c["domain"]
+                    if c.get("httpOnly") is not None:
+                        cookie["httpOnly"] = c["httpOnly"]
+                    if c.get("secure") is not None:
+                        cookie["secure"] = c["secure"]
+                    if c.get("sameSite"):
+                        cookie["sameSite"] = c["sameSite"]
+                    session_cookies.append(cookie)
+
+            if session_cookies:
+                await context.add_cookies(session_cookies)
+                logger.info(f"已将 {len(session_cookies)} 个 session cookie 转为 persistent（expires +7d）")
+        except Exception as e:
+            logger.warning(f"持久化 session cookie 失败: {e}")
+
+    def _read_cookies_from_sqlite(self, profile_id: int) -> Dict[str, Any]:
+        """直接从 Chromium Cookie SQLite 文件读取 cookie，不启动浏览器。
+        
+        Linux Docker 容器里没有 keyring，Chromium 用固定 key 或不加密。
+        返回 {"flow2api_token": str|None, "gemini_cookies": {"psid": ..., "psidts": ...}}
+        """
+        result: Dict[str, Any] = {"flow2api_token": None, "gemini_cookies": {}}
+        profile_dir = self._get_profile_dir(profile_id)
+        cookies_db = os.path.join(profile_dir, "Default", "Cookies")
+
+        if not os.path.isfile(cookies_db):
+            return result
+
+        conn = None
+        try:
+            # 用 immutable 模式打开，避免锁冲突
+            conn = sqlite3.connect(f"file:{cookies_db}?mode=ro&immutable=1", uri=True)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT host_key, name, value, encrypted_value FROM cookies "
+                "WHERE (host_key LIKE '%labs.google%' OR host_key LIKE '%google.com%') "
+                "AND name IN (?, '__Secure-1PSID', '__Secure-1PSIDTS')",
+                (config.session_cookie_name,)
+            )
+            for host_key, name, value, encrypted_value in cursor.fetchall():
+                # 优先用明文 value，如果为空尝试 encrypted_value
+                cookie_val = value
+                if not cookie_val and encrypted_value:
+                    cookie_val = self._try_decrypt_cookie(encrypted_value)
+                if not cookie_val:
+                    continue
+
+                if name == config.session_cookie_name and "labs.google" in host_key:
+                    result["flow2api_token"] = cookie_val
+                elif name == "__Secure-1PSID":
+                    result["gemini_cookies"]["psid"] = cookie_val
+                elif name == "__Secure-1PSIDTS":
+                    result["gemini_cookies"]["psidts"] = cookie_val
+
+        except Exception as e:
+            logger.debug(f"SQLite 直读 cookie 失败: {e}")
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        return result
+
+    @staticmethod
+    def _try_decrypt_cookie(encrypted_value: bytes) -> str:
+        """尝试解密 Linux Chromium cookie（固定 key 'peanuts'，PBKDF2 + AES-CBC）"""
+        if not encrypted_value or len(encrypted_value) < 4:
+            return ""
+        # v10/v11 前缀表示加密
+        if encrypted_value[:3] == b"v10" or encrypted_value[:3] == b"v11":
+            try:
+                from hashlib import pbkdf2_hmac
+                from Crypto.Cipher import AES
+                key = pbkdf2_hmac("sha1", b"peanuts", b"saltysalt", 1, dklen=16)
+                iv = b" " * 16
+                cipher = AES.new(key, AES.MODE_CBC, iv)
+                decrypted = cipher.decrypt(encrypted_value[3:])
+                # 去 PKCS7 padding
+                pad_len = decrypted[-1]
+                if isinstance(pad_len, int) and 0 < pad_len <= 16:
+                    decrypted = decrypted[:-pad_len]
+                return decrypted.decode("utf-8", errors="ignore")
+            except Exception:
+                return ""
+        # 无前缀 → 可能是明文
+        try:
+            return encrypted_value.decode("utf-8", errors="ignore")
+        except Exception:
+            return ""
 
     async def _get_proxy(self, profile: Dict[str, Any]) -> Optional[Dict]:
         """获取代理配置"""
@@ -288,14 +564,15 @@ class BrowserManager:
                 context = await self._playwright.chromium.launch_persistent_context(
                     user_data_dir=profile_dir,
                     headless=True,
-                    viewport={"width": 1024, "height": 768},
+                    viewport=self._get_viewport(profile_id),
                     locale="en-US",
                     timezone_id="America/New_York",
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    user_agent=USER_AGENT,
                     proxy=proxy,
                     args=BROWSER_ARGS,
                     ignore_default_args=["--enable-automation"],
                 )
+                await self._inject_stealth(context)
 
                 await context.add_cookies(cookies)
                 token = await self._get_session_cookie(context)
@@ -319,6 +596,10 @@ class BrowserManager:
                 return {"success": False, "error": str(e)}
             finally:
                 if context:
+                    try:
+                        await self._persist_cookies_before_close(context)
+                    except Exception:
+                        pass
                     try:
                         await context.close()
                     except Exception:
@@ -351,23 +632,19 @@ class BrowserManager:
                 self._clean_locks(profile_dir)  # 清理锁文件
                 proxy = await self._get_proxy(profile)
 
-                # 非 headless，用于 VNC 登录（移除可能触发 Google 检测的参数）
+                # 非 headless，用于 VNC 登录（更少限制，更像真人浏览器）
                 self._active_context = await self._playwright.chromium.launch_persistent_context(
                     user_data_dir=profile_dir,
                     headless=False,  # VNC 可见
-                    viewport={"width": 1024, "height": 768},
+                    viewport=self._get_viewport(profile_id),
                     locale="en-US",
                     timezone_id="America/New_York",
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    user_agent=USER_AGENT,
                     proxy=proxy,
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--disable-dev-shm-usage",
-                        "--no-first-run",
-                        "--no-default-browser-check",
-                    ],
+                    args=VNC_BROWSER_ARGS,
                     ignore_default_args=["--enable-automation"],
                 )
+                await self._inject_stealth(self._active_context)
                 self._active_profile_id = profile_id
 
                 page = self._active_context.pages[0] if self._active_context.pages else await self._active_context.new_page()
@@ -430,6 +707,9 @@ class BrowserManager:
     async def extract_token(self, profile_id: int) -> Dict[str, Any]:
         """提取 Token（Headless 模式，使用持久化上下文）
         
+        优先尝试直接读取 SQLite cookie 文件（不启动浏览器），
+        失败时 fallback 到 headless 浏览器提取。
+        
         Returns:
             {"flow2api_token": str|None, "gemini_cookies": {"psid": str, "psidts": str}|{}}
         """
@@ -449,7 +729,27 @@ class BrowserManager:
             if self._active_profile_id == profile_id and self._active_context:
                 return await self._extract_from_context(profile, self._active_context)
 
-            # 否则用 headless 模式启动
+            # 第一层：尝试直接读 SQLite cookie 文件（不启动浏览器，零风险）
+            sqlite_result = self._read_cookies_from_sqlite(profile_id)
+            has_flow2api = bool(sqlite_result.get("flow2api_token"))
+            has_gemini = bool(
+                sqlite_result.get("gemini_cookies", {}).get("psid")
+                and sqlite_result.get("gemini_cookies", {}).get("psidts")
+            )
+            if has_flow2api or has_gemini:
+                logger.info(f"[{profile['name']}] SQLite 直读成功 (flow2api={has_flow2api}, gemini={has_gemini})")
+                if has_flow2api:
+                    await profile_db.update_profile(
+                        profile_id,
+                        is_logged_in=1,
+                        last_token=self._mask_token(sqlite_result["flow2api_token"]),
+                        last_token_time=datetime.now().isoformat(),
+                    )
+                return sqlite_result
+
+            logger.info(f"[{profile['name']}] SQLite 直读无结果，fallback 到 headless 浏览器...")
+
+            # 第二层：fallback 到 headless 浏览器提取
             context = None
             try:
                 if not self._playwright:
@@ -465,14 +765,15 @@ class BrowserManager:
                 context = await self._playwright.chromium.launch_persistent_context(
                     user_data_dir=profile_dir,
                     headless=True,  # Headless 省资源
-                    viewport={"width": 1024, "height": 768},
+                    viewport=self._get_viewport(profile_id),
                     locale="en-US",
                     timezone_id="America/New_York",
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    user_agent=USER_AGENT,
                     proxy=proxy,
-                    args=BROWSER_ARGS,  # 完整内存优化参数
+                    args=BROWSER_ARGS,  # 完整内存优化 + 反检测参数
                     ignore_default_args=["--enable-automation"],
                 )
+                await self._inject_stealth(context)
 
                 result = await self._extract_from_context(profile, context)
                 return result
@@ -482,6 +783,10 @@ class BrowserManager:
                 return {"flow2api_token": None, "gemini_cookies": {}}
             finally:
                 if context:
+                    try:
+                        await self._persist_cookies_before_close(context)
+                    except Exception:
+                        pass
                     try:
                         await context.close()
                     except Exception:
@@ -526,11 +831,30 @@ class BrowserManager:
                 logger.warning(f"[{profile['name']}] 点击登录按钮失败: {e}，尝试直接检查 cookie")
 
             # 等待跳转到 https://labs.google/ 并提取 cookie
+            # 如果跳到了 accounts.google.com，尝试自动登录
             try:
                 await page.wait_for_url("https://labs.google/**", timeout=30000)
                 logger.info(f"[{profile['name']}] 已成功跳转到 labs.google")
             except Exception as e:
                 logger.warning(f"[{profile['name']}] 等待跳转超时: {e}")
+                # 检查是否在 Google 登录页面，尝试自动登录
+                if "accounts.google.com" in page.url and (
+                    profile.get("google_email") or profile.get("google_password") or profile.get("totp_secret")
+                ):
+                    logger.info(f"[{profile['name']}] 检测到 Google 登录页面，尝试自动登录...")
+                    login_deadline = asyncio.get_running_loop().time() + 45.0
+                    while asyncio.get_running_loop().time() < login_deadline:
+                        if "accounts.google.com" not in page.url:
+                            break
+                        acted = await self.auto_google_login(page, profile)
+                        if not acted:
+                            await asyncio.sleep(1)
+                    # 登录完成后等待跳转回 labs.google
+                    try:
+                        await page.wait_for_url("https://labs.google/**", timeout=15000)
+                        logger.info(f"[{profile['name']}] 自动登录后成功跳转到 labs.google")
+                    except Exception:
+                        logger.warning(f"[{profile['name']}] 自动登录后仍未跳转到 labs.google")
 
             # 等待 cookie 更新：优先轮询 session cookie，减少资源占用
             token = None
@@ -647,14 +971,15 @@ class BrowserManager:
                     context = await self._playwright.chromium.launch_persistent_context(
                         user_data_dir=profile_dir,
                         headless=True,
-                        viewport={"width": 1024, "height": 768},
+                        viewport=self._get_viewport(profile_id),
                         locale="en-US",
                         timezone_id="America/New_York",
-                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        user_agent=USER_AGENT,
                         proxy=proxy,
                         args=BROWSER_ARGS,
                         ignore_default_args=["--enable-automation"],
                     )
+                    await self._inject_stealth(context)
                     has_flow2api = bool(await self._get_session_cookie(context))
                     gemini_cookies = await self._get_gemini_cookies(context)
                     has_gemini = bool(gemini_cookies.get("psid"))
@@ -662,6 +987,10 @@ class BrowserManager:
                     pass
                 finally:
                     if context:
+                        try:
+                            await self._persist_cookies_before_close(context)
+                        except Exception:
+                            pass
                         try:
                             await context.close()
                         except Exception:
@@ -701,19 +1030,24 @@ class BrowserManager:
                 context = await self._playwright.chromium.launch_persistent_context(
                     user_data_dir=profile_dir,
                     headless=True,
-                    viewport={"width": 1024, "height": 768},
+                    viewport=self._get_viewport(profile_id),
                     locale="en-US",
                     timezone_id="America/New_York",
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    user_agent=USER_AGENT,
                     proxy=proxy,
                     args=BROWSER_ARGS,
                     ignore_default_args=["--enable-automation"],
                 )
+                await self._inject_stealth(context)
                 return await self._get_session_cookie(context)
             except Exception:
                 return None
             finally:
                 if context:
+                    try:
+                        await self._persist_cookies_before_close(context)
+                    except Exception:
+                        pass
                     try:
                         await context.close()
                     except Exception:
@@ -743,19 +1077,24 @@ class BrowserManager:
                 context = await self._playwright.chromium.launch_persistent_context(
                     user_data_dir=profile_dir,
                     headless=True,
-                    viewport={"width": 1024, "height": 768},
+                    viewport=self._get_viewport(profile_id),
                     locale="en-US",
                     timezone_id="America/New_York",
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    user_agent=USER_AGENT,
                     proxy=proxy,
                     args=BROWSER_ARGS,
                     ignore_default_args=["--enable-automation"],
                 )
+                await self._inject_stealth(context)
                 return await self._get_gemini_cookies(context)
             except Exception:
                 return {}
             finally:
                 if context:
+                    try:
+                        await self._persist_cookies_before_close(context)
+                    except Exception:
+                        pass
                     try:
                         await context.close()
                     except Exception:
