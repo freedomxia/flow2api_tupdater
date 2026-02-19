@@ -65,6 +65,20 @@ v3.1 使用持久化 Profile 登录（按需启停 VNC 以降低内存）：
 3. 重新构建镜像
 4. 如需重新授权：进入管理界面逐个 Profile 点击「登录」完成 Google 登录
 
+## 更新日志
+
+### 2025-02-20
+
+- 重构 `browser.py`：优化浏览器模块，改进 Token 刷新逻辑和稳定性
+- 新增测试用例：
+  - `test_token_refresh.py` — Token 刷新核心流程测试
+  - `test_token_refresh_edge_cases.py` — Token 刷新边界情况测试
+  - `test_token_refresh_integration.py` — Token 刷新集成测试
+  - `test_extract_flow.py` — 提取流程测试
+- 更新 `test_cookie_persistence.py`：完善 Cookie 持久化测试
+- 新增 `docker-compose.test.yml`：测试环境 Docker 配置
+- 更新 `.gitignore`：忽略 `.DS_Store` 等无关文件
+
 ## License
 
 MIT
