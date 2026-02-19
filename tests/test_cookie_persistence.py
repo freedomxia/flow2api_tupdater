@@ -375,16 +375,16 @@ class TestTryDecryptCookie:
 # ============ 4. extract_token SQLite 直读路径 端到端测试 ============
 
 class TestExtractTokenSqlitePath:
-    """测试 extract_token 优先走 SQLite 直读"""
+    """测试 extract_token SQLite 检查（不再作为最终结果）"""
 
     @pytest.mark.asyncio
-    async def test_sqlite_path_skips_browser(self):
-        """SQLite 直读成功时不应启动浏览器"""
+    async def test_sqlite_check_then_browser(self):
+        """SQLite 有 cookie 时仍应启动浏览器刷新"""
         from token_updater.browser import BrowserManager
         bm = BrowserManager()
         bm._lock = asyncio.Lock()
 
-        mock_profile = {"id": 1, "name": "Test", "email": "t@g.com"}
+        mock_profile = {"id": 1, "name": "Test", "email": "t@g.com", "proxy_enabled": False}
 
         with patch("token_updater.browser.profile_db") as mock_db:
             mock_db.get_profile = AsyncMock(return_value=mock_profile)
@@ -400,34 +400,7 @@ class TestExtractTokenSqlitePath:
                 with patch.object(bm, '_get_profile_dir',
                                   return_value="/fake/profile"):
                     with patch("os.path.exists", return_value=True):
-                        result = await bm.extract_token(1)
-
-            assert result["flow2api_token"] == "sqlite_token_123"
-            assert result["gemini_cookies"]["psid"] == "p1"
-            # 不应启动 playwright
-            assert bm._playwright is None
-
-    @pytest.mark.asyncio
-    async def test_sqlite_empty_falls_back_to_browser(self):
-        """SQLite 直读无结果时应 fallback 到 headless 浏览器"""
-        from token_updater.browser import BrowserManager
-        bm = BrowserManager()
-        bm._lock = asyncio.Lock()
-
-        mock_profile = {"id": 1, "name": "Test", "email": "t@g.com"}
-
-        with patch("token_updater.browser.profile_db") as mock_db:
-            mock_db.get_profile = AsyncMock(return_value=mock_profile)
-            mock_db.update_profile = AsyncMock()
-
-            empty_result = {"flow2api_token": None, "gemini_cookies": {}}
-
-            with patch.object(bm, '_read_cookies_from_sqlite',
-                              return_value=empty_result):
-                with patch.object(bm, '_get_profile_dir',
-                                  return_value="/fake/profile"):
-                    with patch("os.path.exists", return_value=True):
-                        # Mock playwright 启动
+                        # Mock playwright - 应该被调用
                         mock_context = AsyncMock()
                         mock_context.close = AsyncMock()
                         mock_pw = AsyncMock()
@@ -443,18 +416,67 @@ class TestExtractTokenSqlitePath:
                             with patch.object(bm, '_clean_locks'):
                                 with patch.object(bm, '_get_proxy',
                                                   return_value=None):
-                                    with patch.object(
-                                        bm,
-                                        '_persist_cookies_before_close',
-                                        new_callable=AsyncMock
-                                    ):
-                                        result = await bm.extract_token(1)
+                                    with patch.object(bm, '_inject_stealth', new_callable=AsyncMock):
+                                        with patch.object(
+                                            bm,
+                                            '_persist_cookies_before_close',
+                                            new_callable=AsyncMock
+                                        ):
+                                            result = await bm.extract_token(1)
+
+            # 应该返回浏览器提取的结果，而不是 SQLite 的
+            assert result["flow2api_token"] == "browser_tok"
+            # 应该启动了浏览器
+            mock_pw.chromium.launch_persistent_context.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_sqlite_empty_still_launches_browser(self):
+        """SQLite 无结果时也应启动浏览器"""
+        from token_updater.browser import BrowserManager
+        bm = BrowserManager()
+        bm._lock = asyncio.Lock()
+
+        mock_profile = {"id": 1, "name": "Test", "email": "t@g.com", "proxy_enabled": False}
+
+        with patch("token_updater.browser.profile_db") as mock_db:
+            mock_db.get_profile = AsyncMock(return_value=mock_profile)
+            mock_db.update_profile = AsyncMock()
+
+            empty_result = {"flow2api_token": None, "gemini_cookies": {}}
+
+            with patch.object(bm, '_read_cookies_from_sqlite',
+                              return_value=empty_result):
+                with patch.object(bm, '_get_profile_dir',
+                                  return_value="/fake/profile"):
+                    with patch("os.path.exists", return_value=True):
+                        mock_context = AsyncMock()
+                        mock_context.close = AsyncMock()
+                        mock_pw = AsyncMock()
+                        mock_pw.chromium.launch_persistent_context = AsyncMock(
+                            return_value=mock_context)
+                        bm._playwright = mock_pw
+
+                        with patch.object(bm, '_extract_from_context',
+                                          return_value={
+                                              "flow2api_token": "browser_tok",
+                                              "gemini_cookies": {}
+                                          }):
+                            with patch.object(bm, '_clean_locks'):
+                                with patch.object(bm, '_get_proxy',
+                                                  return_value=None):
+                                    with patch.object(bm, '_inject_stealth', new_callable=AsyncMock):
+                                        with patch.object(
+                                            bm,
+                                            '_persist_cookies_before_close',
+                                            new_callable=AsyncMock
+                                        ):
+                                            result = await bm.extract_token(1)
 
             assert result["flow2api_token"] == "browser_tok"
 
     @pytest.mark.asyncio
-    async def test_sqlite_updates_profile_on_success(self):
-        """SQLite 直读成功时应更新 profile 状态"""
+    async def test_no_profile_dir_returns_empty(self):
+        """无 profile 目录时应返回空"""
         from token_updater.browser import BrowserManager
         bm = BrowserManager()
         bm._lock = asyncio.Lock()
@@ -463,24 +485,13 @@ class TestExtractTokenSqlitePath:
 
         with patch("token_updater.browser.profile_db") as mock_db:
             mock_db.get_profile = AsyncMock(return_value=mock_profile)
-            mock_db.update_profile = AsyncMock()
 
-            sqlite_result = {
-                "flow2api_token": "tok_xyz",
-                "gemini_cookies": {},
-            }
+            with patch.object(bm, '_get_profile_dir', return_value="/fake/profile"):
+                with patch("os.path.exists", return_value=False):
+                    result = await bm.extract_token(1)
 
-            with patch.object(bm, '_read_cookies_from_sqlite',
-                              return_value=sqlite_result):
-                with patch.object(bm, '_get_profile_dir',
-                                  return_value="/fake/profile"):
-                    with patch("os.path.exists", return_value=True):
-                        await bm.extract_token(1)
-
-            # 应该更新 profile
-            mock_db.update_profile.assert_called_once()
-            call_kwargs = mock_db.update_profile.call_args[1]
-            assert call_kwargs["is_logged_in"] == 1
+        assert result["flow2api_token"] is None
+        assert result["gemini_cookies"] == {}
 
 
 # ============ 5. 端到端流程模拟测试 ============
@@ -494,7 +505,7 @@ class TestEndToEndCookiePersistence:
         模拟：
         1. VNC 登录设置了 session cookie（expires=-1）
         2. close_browser 调用 _persist_cookies_before_close 转换 cookie
-        3. extract_token 通过 SQLite 直读获取 cookie
+        3. extract_token 启动浏览器刷新 session
         """
         from token_updater.browser import BrowserManager
         bm = BrowserManager()
@@ -577,7 +588,7 @@ class TestEndToEndCookiePersistence:
         for c in persisted:
             assert c["expires"] > time.time()  # 应有未来的过期时间
 
-        # Step 3: 模拟 extract_token 通过 SQLite 直读
+        # Step 3: 模拟 extract_token 启动浏览器刷新
         bm._active_context = None
         bm._active_profile_id = None
 
@@ -598,12 +609,32 @@ class TestEndToEndCookiePersistence:
                 with patch.object(bm, '_get_profile_dir',
                                   return_value="/fake/profile"):
                     with patch("os.path.exists", return_value=True):
-                        extract_result = await bm.extract_token(1)
+                        # Mock 浏览器启动和提取
+                        mock_extract_context = AsyncMock()
+                        mock_extract_context.close = AsyncMock()
+                        mock_pw = AsyncMock()
+                        mock_pw.chromium.launch_persistent_context = AsyncMock(
+                            return_value=mock_extract_context)
+                        bm._playwright = mock_pw
 
-        # 验证提取结果
-        assert extract_result["flow2api_token"] == "e2e_session_token_value"
-        assert extract_result["gemini_cookies"]["psid"] == "e2e_psid_value"
-        assert extract_result["gemini_cookies"]["psidts"] == "e2e_psidts_value"
+                        with patch.object(bm, '_extract_from_context',
+                                          return_value={
+                                              "flow2api_token": "refreshed_token",
+                                              "gemini_cookies": {
+                                                  "psid": "refreshed_psid",
+                                                  "psidts": "refreshed_psidts",
+                                              }
+                                          }):
+                            with patch.object(bm, '_clean_locks'):
+                                with patch.object(bm, '_get_proxy', return_value=None):
+                                    with patch.object(bm, '_inject_stealth', new_callable=AsyncMock):
+                                        with patch.object(bm, '_persist_cookies_before_close', new_callable=AsyncMock):
+                                            extract_result = await bm.extract_token(1)
+
+        # 验证提取结果（应该是浏览器刷新后的值）
+        assert extract_result["flow2api_token"] == "refreshed_token"
+        assert extract_result["gemini_cookies"]["psid"] == "refreshed_psid"
+        assert extract_result["gemini_cookies"]["psidts"] == "refreshed_psidts"
 
     @pytest.mark.asyncio
     async def test_close_active_persists_cookies(self):

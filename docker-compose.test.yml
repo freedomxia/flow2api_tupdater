@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  token-updater:
+    build: .
+    container_name: flow2api-token-updater-test
+    volumes:
+      - ./data:/app/data
+      - ./profiles:/app/profiles
+      - ./logs:/app/logs
+      - ./tests:/app/tests
+      - ./token_updater:/app/token_updater
+    environment:
+      - ADMIN_PASSWORD=test
+      - ENABLE_VNC=0
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

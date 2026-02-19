@@ -43,6 +43,16 @@ VNC_BROWSER_ARGS = [
     "--no-default-browser-check",
 ]
 
+# Headless 提取专用参数（比 BROWSER_ARGS 更少限制，降低被 Google 检测的风险）
+HEADLESS_EXTRACT_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--no-first-run",
+    "--no-default-browser-check",
+]
+
 # 更新到最新 Chrome 版本
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -707,8 +717,8 @@ class BrowserManager:
     async def extract_token(self, profile_id: int) -> Dict[str, Any]:
         """提取 Token（Headless 模式，使用持久化上下文）
         
-        优先尝试直接读取 SQLite cookie 文件（不启动浏览器），
-        失败时 fallback 到 headless 浏览器提取。
+        始终通过浏览器访问页面来刷新 session，确保获取最新的 token。
+        SQLite 直读只用于快速检查是否有持久化数据。
         
         Returns:
             {"flow2api_token": str|None, "gemini_cookies": {"psid": str, "psidts": str}|{}}
@@ -729,27 +739,17 @@ class BrowserManager:
             if self._active_profile_id == profile_id and self._active_context:
                 return await self._extract_from_context(profile, self._active_context)
 
-            # 第一层：尝试直接读 SQLite cookie 文件（不启动浏览器，零风险）
+            # 检查 SQLite 是否有 cookie（仅用于日志，不作为最终结果）
             sqlite_result = self._read_cookies_from_sqlite(profile_id)
-            has_flow2api = bool(sqlite_result.get("flow2api_token"))
-            has_gemini = bool(
+            has_sqlite_cookie = bool(sqlite_result.get("flow2api_token")) or bool(
                 sqlite_result.get("gemini_cookies", {}).get("psid")
-                and sqlite_result.get("gemini_cookies", {}).get("psidts")
             )
-            if has_flow2api or has_gemini:
-                logger.info(f"[{profile['name']}] SQLite 直读成功 (flow2api={has_flow2api}, gemini={has_gemini})")
-                if has_flow2api:
-                    await profile_db.update_profile(
-                        profile_id,
-                        is_logged_in=1,
-                        last_token=self._mask_token(sqlite_result["flow2api_token"]),
-                        last_token_time=datetime.now().isoformat(),
-                    )
-                return sqlite_result
+            if has_sqlite_cookie:
+                logger.info(f"[{profile['name']}] SQLite 有持久化 cookie，启动浏览器刷新 session...")
+            else:
+                logger.info(f"[{profile['name']}] SQLite 无 cookie，启动浏览器提取...")
 
-            logger.info(f"[{profile['name']}] SQLite 直读无结果，fallback 到 headless 浏览器...")
-
-            # 第二层：fallback 到 headless 浏览器提取
+            # 始终通过浏览器访问页面来刷新 session
             context = None
             try:
                 if not self._playwright:
@@ -761,16 +761,16 @@ class BrowserManager:
 
                 logger.info(f"[{profile['name']}] Headless 模式提取 Token...")
 
-                # Headless + 持久化上下文
+                # Headless + 持久化上下文（使用更少限制的参数，降低被检测风险）
                 context = await self._playwright.chromium.launch_persistent_context(
                     user_data_dir=profile_dir,
-                    headless=True,  # Headless 省资源
+                    headless=True,
                     viewport=self._get_viewport(profile_id),
                     locale="en-US",
                     timezone_id="America/New_York",
                     user_agent=USER_AGENT,
                     proxy=proxy,
-                    args=BROWSER_ARGS,  # 完整内存优化 + 反检测参数
+                    args=HEADLESS_EXTRACT_ARGS,  # 使用更少限制的参数
                     ignore_default_args=["--enable-automation"],
                 )
                 await self._inject_stealth(context)
@@ -794,7 +794,13 @@ class BrowserManager:
                     logger.info(f"[{profile['name']}] Headless 浏览器已关闭")
 
     async def _extract_from_context(self, profile: Dict[str, Any], context: BrowserContext) -> Dict[str, Any]:
-        """从上下文提取 Token（通过 signin 页面刷新 session）+ Gemini Cookie"""
+        """从上下文提取 Token + Gemini Cookie
+        
+        改进策略：
+        1. 先访问 NextAuth session endpoint 强制刷新 token
+        2. 然后访问 labs.google 页面触发完整的 session 刷新
+        3. 只有当 session 失效（被重定向到登录页）时，才 fallback 到 OAuth 流程
+        """
         page = None
         result = {"flow2api_token": None, "gemini_cookies": {}}
         try:
@@ -817,61 +823,125 @@ class BrowserManager:
             except Exception:
                 pass
 
-            # 访问 signin 页面并点击 Sign in with Google 按钮刷新 session
-            logger.info(f"[{profile['name']}] 访问 {config.login_url} 刷新 session...")
-            await page.goto(config.login_url, wait_until="domcontentloaded", timeout=60000)
-
-            # 点击 Sign in with Google 按钮（提交 POST 表单）
+            # ========== 第一步：访问 NextAuth session endpoint 强制刷新 token ==========
+            session_url = "https://labs.google/fx/api/auth/session"
+            logger.info(f"[{profile['name']}] 访问 session endpoint 强制刷新 token...")
+            
+            old_token = await self._get_session_cookie(context)
+            old_token_prefix = old_token[:20] if old_token else None
+            
             try:
-                submit_btn = page.locator("button[type='submit']")
-                await submit_btn.wait_for(state="visible", timeout=10000)
-                await submit_btn.click()
-                logger.info(f"[{profile['name']}] 已点击 Sign in with Google，等待跳转...")
+                # 访问 session endpoint，这会触发 NextAuth 刷新 token
+                response = await page.goto(session_url, wait_until="networkidle", timeout=30000)
+                if response and response.ok:
+                    logger.info(f"[{profile['name']}] session endpoint 返回成功")
+                    # 等待 cookie 更新
+                    await asyncio.sleep(1)
             except Exception as e:
-                logger.warning(f"[{profile['name']}] 点击登录按钮失败: {e}，尝试直接检查 cookie")
+                logger.warning(f"[{profile['name']}] 访问 session endpoint 失败: {e}")
 
-            # 等待跳转到 https://labs.google/ 并提取 cookie
-            # 如果跳到了 accounts.google.com，尝试自动登录
+            # ========== 第二步：访问 labs.google 页面触发完整刷新 ==========
+            logger.info(f"[{profile['name']}] 访问 {config.labs_url} 触发页面级刷新...")
+            goto_success = False
             try:
-                await page.wait_for_url("https://labs.google/**", timeout=30000)
-                logger.info(f"[{profile['name']}] 已成功跳转到 labs.google")
+                await page.goto(config.labs_url, wait_until="domcontentloaded", timeout=30000)
+                goto_success = True
             except Exception as e:
-                logger.warning(f"[{profile['name']}] 等待跳转超时: {e}")
-                # 检查是否在 Google 登录页面，尝试自动登录
-                if "accounts.google.com" in page.url and (
-                    profile.get("google_email") or profile.get("google_password") or profile.get("totp_secret")
-                ):
-                    logger.info(f"[{profile['name']}] 检测到 Google 登录页面，尝试自动登录...")
-                    login_deadline = asyncio.get_running_loop().time() + 45.0
-                    while asyncio.get_running_loop().time() < login_deadline:
-                        if "accounts.google.com" not in page.url:
-                            break
-                        acted = await self.auto_google_login(page, profile)
-                        if not acted:
-                            await asyncio.sleep(1)
-                    # 登录完成后等待跳转回 labs.google
-                    try:
-                        await page.wait_for_url("https://labs.google/**", timeout=15000)
-                        logger.info(f"[{profile['name']}] 自动登录后成功跳转到 labs.google")
-                    except Exception:
-                        logger.warning(f"[{profile['name']}] 自动登录后仍未跳转到 labs.google")
+                logger.warning(f"[{profile['name']}] 访问 labs.google 失败: {e}")
 
-            # 等待 cookie 更新：优先轮询 session cookie，减少资源占用
-            token = None
-            deadline = asyncio.get_running_loop().time() + 12.0
-            while asyncio.get_running_loop().time() < deadline:
-                token = await self._get_session_cookie(context)
-                if token:
-                    break
-                await asyncio.sleep(0.5)
-
-            if not token:
+            # 检查当前 URL，判断是否被重定向到登录页
+            current_url = page.url if goto_success else ""
+            needs_oauth = False
+            
+            if not goto_success:
+                needs_oauth = True
+                logger.info(f"[{profile['name']}] 访问 labs.google 失败，尝试 OAuth 流程")
+            elif "accounts.google.com" in current_url or "/signin" in current_url or "/auth/" in current_url:
+                needs_oauth = True
+                logger.info(f"[{profile['name']}] 被重定向到登录页 ({current_url[:60]}...)，需要重新认证")
+            else:
+                # 在 labs.google 页面，等待页面完全加载
+                logger.info(f"[{profile['name']}] 在 labs.google 页面，等待完全加载...")
                 try:
-                    await page.wait_for_load_state("networkidle", timeout=8000)
+                    await page.wait_for_load_state("networkidle", timeout=15000)
                 except Exception:
                     pass
-                token = await self._get_session_cookie(context)
+                # 额外等待确保 cookie 刷新完成
+                await asyncio.sleep(2)
+            
+            # 检查是否已有 session cookie
+            token = await self._get_session_cookie(context)
+            
+            # 检查 token 是否有变化
+            new_token_prefix = token[:20] if token else None
+            if old_token_prefix and new_token_prefix and old_token_prefix != new_token_prefix:
+                logger.info(f"[{profile['name']}] Token 已刷新: {old_token_prefix}... -> {new_token_prefix}...")
+            elif old_token_prefix and new_token_prefix:
+                logger.info(f"[{profile['name']}] Token 未变化（可能未过期）: {new_token_prefix}...")
+            
+            if token and not needs_oauth:
+                logger.info(f"[{profile['name']}] 成功获取到 token")
+            elif not token and not needs_oauth:
+                needs_oauth = True
+                logger.info(f"[{profile['name']}] 页面加载后未检测到 token，尝试 OAuth 流程")
 
+            # ========== 第二步：如果需要，走 OAuth 流程（fallback） ==========
+            if needs_oauth:
+                logger.info(f"[{profile['name']}] 访问 {config.login_url} 进行 OAuth 认证...")
+                await page.goto(config.login_url, wait_until="domcontentloaded", timeout=60000)
+
+                # 点击 Sign in with Google 按钮
+                try:
+                    submit_btn = page.locator("button[type='submit']")
+                    await submit_btn.wait_for(state="visible", timeout=10000)
+                    await submit_btn.click()
+                    logger.info(f"[{profile['name']}] 已点击 Sign in with Google，等待跳转...")
+                except Exception as e:
+                    logger.warning(f"[{profile['name']}] 点击登录按钮失败: {e}")
+
+                # 等待跳转到 labs.google
+                try:
+                    await page.wait_for_url("https://labs.google/**", timeout=30000)
+                    logger.info(f"[{profile['name']}] 已成功跳转到 labs.google")
+                except Exception as e:
+                    logger.warning(f"[{profile['name']}] 等待跳转超时: {e}，当前 URL: {page.url}")
+                    # 检查是否在 Google 登录页面，尝试自动登录
+                    if "accounts.google.com" in page.url and (
+                        profile.get("google_email") or profile.get("google_password") or profile.get("totp_secret")
+                    ):
+                        logger.info(f"[{profile['name']}] 检测到 Google 登录页面，尝试自动登录...")
+                        login_deadline = asyncio.get_running_loop().time() + 45.0
+                        while asyncio.get_running_loop().time() < login_deadline:
+                            if "accounts.google.com" not in page.url:
+                                break
+                            acted = await self.auto_google_login(page, profile)
+                            if not acted:
+                                await asyncio.sleep(1)
+                        # 登录完成后等待跳转回 labs.google
+                        try:
+                            await page.wait_for_url("https://labs.google/**", timeout=15000)
+                            logger.info(f"[{profile['name']}] 自动登录后成功跳转到 labs.google")
+                        except Exception:
+                            logger.warning(f"[{profile['name']}] 自动登录后仍未跳转到 labs.google，当前 URL: {page.url}")
+                            logger.warning(f"[{profile['name']}] Google session 可能已过期，请通过 VNC 重新登录")
+
+                # 轮询等待 session cookie
+                token = None
+                deadline = asyncio.get_running_loop().time() + 12.0
+                while asyncio.get_running_loop().time() < deadline:
+                    token = await self._get_session_cookie(context)
+                    if token:
+                        break
+                    await asyncio.sleep(0.5)
+
+                if not token:
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=8000)
+                    except Exception:
+                        pass
+                    token = await self._get_session_cookie(context)
+
+            # ========== 第三步：处理 Flow2API token 结果 ==========
             if token:
                 await profile_db.update_profile(
                     profile["id"],
@@ -884,7 +954,7 @@ class BrowserManager:
             else:
                 logger.warning(f"[{profile['name']}] 未找到 Flow2API Token")
 
-            # 提取 Gemini Cookie（如果配置了 Gemini API）
+            # ========== 第四步：提取 Gemini Cookie ==========
             if config.gemini_api_url:
                 try:
                     # 先访问 gemini.google.com 刷新 cookie
@@ -918,11 +988,17 @@ class BrowserManager:
                 else:
                     logger.warning(f"[{profile['name']}] 未找到 Gemini Cookie")
 
-            # 更新登录状态
+            # ========== 第五步：更新登录状态 ==========
             has_any_token = bool(result["flow2api_token"]) or bool(result["gemini_cookies"].get("psid"))
             if not has_any_token:
                 await profile_db.update_profile(profile["id"], is_logged_in=0)
-                logger.warning(f"[{profile['name']}] 未找到任何 Token，会话可能已过期")
+                logger.warning(f"[{profile['name']}] 未找到任何 Token，会话可能已过期，请通过 VNC 重新登录")
+
+            # 提取成功后主动持久化 cookie，确保下次 SQLite 直读能命中
+            try:
+                await self._persist_cookies_before_close(context)
+            except Exception:
+                pass
 
             return result
 
@@ -1090,6 +1166,98 @@ class BrowserManager:
             except Exception:
                 return {}
             finally:
+                if context:
+                    try:
+                        await self._persist_cookies_before_close(context)
+                    except Exception:
+                        pass
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass
+
+    async def extract_gemini_only(self, profile_id: int) -> Dict[str, str]:
+        """提取 Gemini cookie（访问 gemini.google.com 刷新 cookie）
+        
+        与 peek_gemini_cookies 不同，这个方法会访问 Gemini 页面来刷新 cookie，
+        适用于 cookie 可能已过期需要刷新的场景。
+        
+        Returns:
+            {"psid": str, "psidts": str} 或 {}
+        """
+        async with self._lock:
+            profile = await profile_db.get_profile(profile_id)
+            if not profile:
+                return {}
+
+            profile_dir = self._get_profile_dir(profile_id)
+            if not os.path.exists(profile_dir):
+                logger.warning(f"[{profile['name']}] 无持久化数据，请先登录")
+                return {}
+
+            # 如果当前 profile 浏览器正在运行，直接提取
+            if self._active_profile_id == profile_id and self._active_context:
+                return await self._get_gemini_cookies(self._active_context)
+
+            # 先尝试 SQLite 直读
+            sqlite_result = self._read_cookies_from_sqlite(profile_id)
+            gemini_cookies = sqlite_result.get("gemini_cookies", {})
+            if gemini_cookies.get("psid") and gemini_cookies.get("psidts"):
+                logger.info(f"[{profile['name']}] SQLite 直读 Gemini cookie 成功")
+                return gemini_cookies
+
+            # fallback 到浏览器提取
+            logger.info(f"[{profile['name']}] SQLite 直读 Gemini cookie 无结果，启动浏览器...")
+            context = None
+            page = None
+            try:
+                if not self._playwright:
+                    await self.start()
+
+                self._clean_locks(profile_dir)
+                proxy = await self._get_proxy(profile)
+                context = await self._playwright.chromium.launch_persistent_context(
+                    user_data_dir=profile_dir,
+                    headless=True,
+                    viewport=self._get_viewport(profile_id),
+                    locale="en-US",
+                    timezone_id="America/New_York",
+                    user_agent=USER_AGENT,
+                    proxy=proxy,
+                    args=HEADLESS_EXTRACT_ARGS,
+                    ignore_default_args=["--enable-automation"],
+                )
+                await self._inject_stealth(context)
+
+                # 访问 Gemini 页面刷新 cookie
+                page = await context.new_page()
+                await page.goto(config.gemini_login_url, wait_until="domcontentloaded", timeout=30000)
+
+                # 轮询等待 cookie
+                gemini_cookies = {}
+                deadline = asyncio.get_running_loop().time() + 15.0
+                while asyncio.get_running_loop().time() < deadline:
+                    gemini_cookies = await self._get_gemini_cookies(context)
+                    if gemini_cookies.get("psid") and gemini_cookies.get("psidts"):
+                        break
+                    await asyncio.sleep(1)
+
+                if gemini_cookies.get("psid") and gemini_cookies.get("psidts"):
+                    logger.info(f"[{profile['name']}] Gemini cookie 提取成功")
+                else:
+                    logger.warning(f"[{profile['name']}] 未找到完整的 Gemini cookie")
+
+                return gemini_cookies
+
+            except Exception as e:
+                logger.error(f"[{profile['name']}] Gemini cookie 提取失败: {e}")
+                return {}
+            finally:
+                if page:
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
                 if context:
                     try:
                         await self._persist_cookies_before_close(context)
